@@ -94,6 +94,19 @@ def test_set_screensaver():
     ])
 
 
+def test_set_screensaver_spi_success_registry_warning():
+    mock_user32 = MagicMock()
+    mock_user32.SystemParametersInfoW.return_value = 1
+
+    mock_winreg = MagicMock()
+    mock_winreg.OpenKey.side_effect = PermissionError("Registry write denied")
+
+    dm = DisplayManager(user32=mock_user32, winreg_module=mock_winreg)
+    # Even if registry fails, SPI succeeded so screensaver call returns True
+    success = dm.set_screensaver(active=True, timeout_seconds=60)
+    assert success is True
+
+
 def test_get_screensaver_state_from_registry():
     mock_winreg = MagicMock()
     mock_key = MagicMock()
@@ -143,6 +156,7 @@ def test_apply_mode_presentation():
         "mode": AppMode.PRESENTATION,
         "topology": "external",
         "screensaver": False,
+        "timeout": None,
     }
 
 
@@ -160,6 +174,7 @@ def test_apply_mode_exercises():
         "mode": AppMode.EXERCISES,
         "topology": "extend",
         "screensaver": False,
+        "timeout": None,
     }
 
 
@@ -190,18 +205,62 @@ def test_apply_mode_with_string_and_invalid_mode():
     res = dm.apply_mode("presentation")
     assert res["mode"] == AppMode.PRESENTATION
     assert res["success"] is True
+    assert res["timeout"] is None
 
     with pytest.raises(ValueError):
         dm.apply_mode("invalid_mode")
 
 
-def test_apply_mode_failure_handling():
+def test_apply_mode_guard_screensaver_on_presentation_failure():
+    dm = DisplayManager()
+    dm.set_display_topology = MagicMock(return_value=False)
+    dm.set_screensaver = MagicMock()
+
+    result = dm.apply_mode(AppMode.PRESENTATION)
+
+    # Screensaver must NOT be disabled to protect OLED panel
+    dm.set_screensaver.assert_not_called()
+    assert result == {
+        "success": False,
+        "mode": AppMode.PRESENTATION,
+        "topology": None,
+        "screensaver": None,
+        "timeout": None,
+    }
+
+
+def test_apply_mode_guard_screensaver_on_exercises_failure():
+    dm = DisplayManager()
+    dm.set_display_topology = MagicMock(return_value=False)
+    dm.set_screensaver = MagicMock()
+
+    result = dm.apply_mode(AppMode.EXERCISES)
+
+    # Screensaver must NOT be disabled to protect OLED panel
+    dm.set_screensaver.assert_not_called()
+    assert result == {
+        "success": False,
+        "mode": AppMode.EXERCISES,
+        "topology": None,
+        "screensaver": None,
+        "timeout": None,
+    }
+
+
+def test_apply_mode_normal_topology_failure():
     dm = DisplayManager()
     dm.set_display_topology = MagicMock(return_value=False)
     dm.set_screensaver = MagicMock(return_value=True)
 
-    result = dm.apply_mode(AppMode.PRESENTATION)
-    assert result["success"] is False
+    result = dm.apply_mode(AppMode.NORMAL, timeout_seconds=60)
+    assert result == {
+        "success": False,
+        "mode": AppMode.NORMAL,
+        "topology": None,
+        "screensaver": True,
+        "timeout": 60,
+    }
+
 
 
 def test_is_hdmi_connected():
@@ -368,4 +427,18 @@ def test_real_windows_host_smoke_test():
     assert len(names) == len(techs)
     connected = dm.is_hdmi_connected(techs)
     assert isinstance(connected, bool)
+
+
+def test_api_signatures_configured():
+    dm = DisplayManager()
+    if dm._user32 is not None:
+        assert hasattr(dm._user32.SetDisplayConfig, "argtypes")
+        assert len(dm._user32.SetDisplayConfig.argtypes) == 5
+        assert hasattr(dm._user32.SystemParametersInfoW, "argtypes")
+        assert len(dm._user32.SystemParametersInfoW.argtypes) == 4
+        assert hasattr(dm._user32.GetDisplayConfigBufferSizes, "argtypes")
+        assert len(dm._user32.GetDisplayConfigBufferSizes.argtypes) == 3
+        assert hasattr(dm._user32.QueryDisplayConfig, "argtypes")
+        assert len(dm._user32.QueryDisplayConfig.argtypes) == 6
+
 

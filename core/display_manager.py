@@ -4,7 +4,6 @@ import ctypes
 from ctypes import wintypes
 from enum import Enum
 import logging
-import sys
 
 try:
     import winreg
@@ -203,6 +202,53 @@ class DisplayManager:
             self._user32 = None
 
         self._winreg = winreg_module if winreg_module is not None else winreg
+        self._setup_api_signatures()
+
+    def _setup_api_signatures(self) -> None:
+        """Configures explicit ctypes argtypes and restype for Win32 API functions."""
+        if self._user32 is None:
+            return
+
+        try:
+            if hasattr(self._user32, "GetDisplayConfigBufferSizes"):
+                self._user32.GetDisplayConfigBufferSizes.argtypes = [
+                    wintypes.UINT,
+                    ctypes.POINTER(wintypes.UINT),
+                    ctypes.POINTER(wintypes.UINT),
+                ]
+                self._user32.GetDisplayConfigBufferSizes.restype = wintypes.LONG
+
+            if hasattr(self._user32, "QueryDisplayConfig"):
+                self._user32.QueryDisplayConfig.argtypes = [
+                    wintypes.UINT,
+                    ctypes.POINTER(wintypes.UINT),
+                    ctypes.POINTER(DISPLAYCONFIG_PATH_INFO),
+                    ctypes.POINTER(wintypes.UINT),
+                    ctypes.POINTER(DISPLAYCONFIG_MODE_INFO),
+                    ctypes.c_void_p,
+                ]
+                self._user32.QueryDisplayConfig.restype = wintypes.LONG
+
+            if hasattr(self._user32, "SetDisplayConfig"):
+                self._user32.SetDisplayConfig.argtypes = [
+                    wintypes.UINT,
+                    ctypes.c_void_p,
+                    wintypes.UINT,
+                    ctypes.c_void_p,
+                    wintypes.UINT,
+                ]
+                self._user32.SetDisplayConfig.restype = wintypes.LONG
+
+            if hasattr(self._user32, "SystemParametersInfoW"):
+                self._user32.SystemParametersInfoW.argtypes = [
+                    wintypes.UINT,
+                    wintypes.UINT,
+                    ctypes.c_void_p,
+                    wintypes.UINT,
+                ]
+                self._user32.SystemParametersInfoW.restype = wintypes.BOOL
+        except Exception as e:
+            logger.debug("Failed to configure API signatures: %s", e)
 
     def get_active_display_technologies(self) -> list[int]:
         """Queries QueryDisplayConfig to retrieve active display output technologies."""
@@ -217,8 +263,11 @@ class DisplayManager:
                 ctypes.byref(path_count),
                 ctypes.byref(mode_count),
             )
-            if res != ERROR_SUCCESS or path_count.value == 0:
+            if res != ERROR_SUCCESS:
                 logger.warning("GetDisplayConfigBufferSizes failed with code: %s", res)
+                return []
+
+            if path_count.value == 0:
                 return []
 
             paths = (DISPLAYCONFIG_PATH_INFO * path_count.value)()
@@ -284,7 +333,7 @@ class DisplayManager:
     def set_screensaver(self, active: bool, timeout_seconds: int = 60) -> bool:
         """Sets screensaver activation and timeout via SystemParametersInfoW and registry."""
         flags = SPIF_UPDATEINIFILE | SPIF_SENDCHANGE
-        spi_ok = True
+        spi_ok = False
 
         if self._user32 is not None:
             try:
@@ -302,12 +351,12 @@ class DisplayManager:
                 )
                 spi_ok = bool(res1 and res2)
             except Exception as e:
-                logger.error("SystemParametersInfoW error: %s", e)
+                logger.warning("SystemParametersInfoW error: %s", e)
                 spi_ok = False
         else:
-            spi_ok = False
+            logger.warning("user32 is not available for set_screensaver")
 
-        reg_ok = True
+        reg_ok = False
         if self._winreg is not None:
             try:
                 with self._winreg.OpenKey(
@@ -330,13 +379,15 @@ class DisplayManager:
                         self._winreg.REG_SZ,
                         str(int(timeout_seconds)),
                     )
+                reg_ok = True
             except Exception as e:
-                logger.error("Registry update error: %s", e)
+                logger.warning("Registry update warning (non-fatal): %s", e)
                 reg_ok = False
         else:
             reg_ok = False
 
-        return bool(spi_ok and reg_ok)
+        # Treat spi_ok as primary indicator; fall back to reg_ok if SPI unavailable
+        return bool(spi_ok or reg_ok)
 
     def get_screensaver_state(self) -> dict:
         """Retrieves screensaver state (active and timeout in seconds)."""
@@ -389,30 +440,68 @@ class DisplayManager:
                 raise ValueError(f"Invalid mode: {mode}")
 
         if mode == AppMode.PRESENTATION:
-            top_ok = self.set_display_topology(SDC_TOPOLOGY_EXTERNAL)
+            if not self.set_display_topology(SDC_TOPOLOGY_EXTERNAL):
+                logger.warning(
+                    "Failed to switch topology to external for presentation; "
+                    "keeping screensaver active to protect OLED panel."
+                )
+                return {
+                    "success": False,
+                    "mode": mode,
+                    "topology": None,
+                    "screensaver": None,
+                    "timeout": None,
+                }
             ss_ok = self.set_screensaver(active=False)
             return {
-                "success": bool(top_ok and ss_ok),
+                "success": bool(ss_ok),
                 "mode": mode,
                 "topology": "external",
-                "screensaver": False,
+                "screensaver": False if ss_ok else None,
+                "timeout": None,
             }
         elif mode == AppMode.EXERCISES:
-            top_ok = self.set_display_topology(SDC_TOPOLOGY_EXTEND)
+            if not self.set_display_topology(SDC_TOPOLOGY_EXTEND):
+                logger.warning(
+                    "Failed to switch topology to extend for exercises; "
+                    "keeping screensaver active to protect OLED panel."
+                )
+                return {
+                    "success": False,
+                    "mode": mode,
+                    "topology": None,
+                    "screensaver": None,
+                    "timeout": None,
+                }
             ss_ok = self.set_screensaver(active=False)
             return {
-                "success": bool(top_ok and ss_ok),
+                "success": bool(ss_ok),
                 "mode": mode,
                 "topology": "extend",
-                "screensaver": False,
+                "screensaver": False if ss_ok else None,
+                "timeout": None,
             }
         elif mode == AppMode.NORMAL:
             top_ok = self.set_display_topology(SDC_TOPOLOGY_INTERNAL)
             ss_ok = self.set_screensaver(
                 active=True, timeout_seconds=timeout_seconds
             )
+            success = bool(top_ok and ss_ok)
+            if not success:
+                logger.warning(
+                    "Failed to apply normal mode (top_ok=%s, ss_ok=%s)",
+                    top_ok,
+                    ss_ok,
+                )
+                return {
+                    "success": False,
+                    "mode": mode,
+                    "topology": "internal" if top_ok else None,
+                    "screensaver": True if ss_ok else None,
+                    "timeout": timeout_seconds if ss_ok else None,
+                }
             return {
-                "success": bool(top_ok and ss_ok),
+                "success": True,
                 "mode": mode,
                 "topology": "internal",
                 "screensaver": True,
