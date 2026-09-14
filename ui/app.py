@@ -107,6 +107,9 @@ class HdmiSelectorApp(ctk.CTk):
             if self.monitor.current_mode is not None
             else self._parse_mode(self.config.default_mode)
         )
+        if initial_mode == AppMode.PRESENTATION and not self.is_hdmi_connected:
+            initial_mode = AppMode.NORMAL
+
         self.monitor.current_mode = initial_mode
         self._update_mode_cards_visual(initial_mode)
 
@@ -349,6 +352,7 @@ class HdmiSelectorApp(ctk.CTk):
                 "No se detecta ningún monitor HDMI o pantalla externa conectada.\n\n"
                 "Si activa el Modo Presentación, la pantalla de la laptop se apagará.\n"
                 "¿Está seguro de que desea continuar?",
+                parent=self,
             )
             if not proceed:
                 return {"success": False, "cancelled": True}
@@ -359,8 +363,18 @@ class HdmiSelectorApp(ctk.CTk):
             )
         except Exception as e:
             logger.error("Error applying mode %s: %s", mode, e)
-            messagebox.showerror("Error", f"No se pudo aplicar el modo: {e}")
+            messagebox.showerror("Error", f"No se pudo aplicar el modo: {e}", parent=self)
             return {"success": False, "error": str(e)}
+
+        if isinstance(res, dict) and not res.get("success", False):
+            logger.warning("apply_mode failed for mode %s: %s", mode, res)
+            messagebox.showerror(
+                "Error al cambiar modo",
+                f"No se pudo aplicar el modo {mode.value if isinstance(mode, AppMode) else mode}.\n"
+                "Verifique la conexión del cable HDMI o el estado de la pantalla externa.",
+                parent=self,
+            )
+            return res
 
         self.monitor.current_mode = mode
         self._update_mode_cards_visual(mode)
@@ -393,6 +407,12 @@ class HdmiSelectorApp(ctk.CTk):
 
     def _on_hdmi_status_changed(self, connected: bool, names: list[str]) -> None:
         """Handles HDMI status change in the main UI thread."""
+        try:
+            if not self.winfo_exists():
+                return
+        except Exception:
+            return
+
         self._update_hdmi_status_ui(connected, names)
 
         # In case monitor auto-restored NORMAL mode
@@ -469,7 +489,13 @@ class HdmiSelectorApp(ctk.CTk):
         self.destroy()
 
     def destroy(self) -> None:
-        """Cancels any pending after timers and safely destroys the window."""
+        """Cancels any pending after timers, stops monitor, and safely destroys the window."""
+        try:
+            if hasattr(self, "monitor") and self.monitor is not None and self.monitor.is_running():
+                self.monitor.stop()
+        except Exception as e:
+            logger.debug("Error stopping monitor during destroy: %s", e)
+
         try:
             if hasattr(self, "tk"):
                 for after_id in self.tk.call("after", "info"):

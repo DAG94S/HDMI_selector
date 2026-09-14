@@ -375,3 +375,65 @@ class TestHdmiSelectorAppEdgeCases:
         mock_error.assert_called_once()
         assert res.get("success") is False
         assert "Win32 failure" in res.get("error", "")
+
+    def test_select_mode_apply_mode_failed_dict(self, app_instance, mock_display_manager, mocker):
+        """If apply_mode returns success=False, UI shows error dialog and does not set card active."""
+        mock_display_manager.apply_mode.return_value = {"success": False, "error": "CCD rejected"}
+        mock_error = mocker.patch("tkinter.messagebox.showerror")
+
+        # Previous active mode was NORMAL
+        assert app_instance.monitor.current_mode == AppMode.NORMAL
+        res = app_instance.select_mode(AppMode.EXERCISES)
+
+        mock_error.assert_called_once()
+        assert res.get("success") is False
+        # Card should not have switched to active
+        ex_card = app_instance.mode_cards[AppMode.EXERCISES]
+        assert ex_card["badge"].cget("text") == ""
+        assert app_instance.monitor.current_mode == AppMode.NORMAL
+
+    def test_startup_fallback_from_presentation_when_no_hdmi(
+        self, tmp_path, mock_display_manager, mock_monitor
+    ):
+        """If default_mode is presentation but HDMI is disconnected, fallback to NORMAL."""
+        cfg = AppConfig(
+            default_mode="presentation",
+            config_path=str(tmp_path / "pres_cfg.json"),
+        )
+        mock_monitor.last_status = False
+        mock_monitor.current_mode = None
+        mock_display_manager.is_hdmi_connected.return_value = False
+
+        app = HdmiSelectorApp(
+            config=cfg,
+            display_manager=mock_display_manager,
+            monitor=mock_monitor,
+            start_monitor=False,
+            withdraw=True,
+        )
+        try:
+            assert app.monitor.current_mode == AppMode.NORMAL
+            normal_card = app.mode_cards[AppMode.NORMAL]
+            assert normal_card["badge"].cget("text") == "[ACTIVO]"
+        finally:
+            app.destroy()
+
+    def test_destroy_stops_running_monitor(self, tmp_path, mock_display_manager):
+        """Direct call to destroy() stops a running monitor thread."""
+        cfg = AppConfig(config_path=str(tmp_path / "destroy_cfg.json"))
+        mon = Mock(spec=HdmiMonitor)
+        mon.last_status = True
+        mon.last_display_names = ["HDMI"]
+        mon.current_mode = AppMode.NORMAL
+        mon.is_running.return_value = True
+
+        app = HdmiSelectorApp(
+            config=cfg,
+            display_manager=mock_display_manager,
+            monitor=mon,
+            start_monitor=False,
+            withdraw=True,
+        )
+        app.destroy()
+        mon.stop.assert_called_once()
+
