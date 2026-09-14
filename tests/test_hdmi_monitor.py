@@ -378,3 +378,106 @@ def test_core_package_exports_hdmi_monitor():
 
     assert ExportedMonitor is HdmiMonitor
     assert "HdmiMonitor" in core_pkg.__all__
+
+
+def test_stop_called_from_callback():
+    mock_dm = MagicMock(spec=DisplayManager)
+    monitor_ref = [None]
+    stopped_event = threading.Event()
+
+    def on_change(connected, names):
+        # Calling stop directly from callback inside the worker thread
+        monitor_ref[0].stop()
+        stopped_event.set()
+
+    mock_dm.get_active_display_technologies.return_value = [6]
+    mock_dm.is_hdmi_connected.return_value = False
+    mock_dm.get_active_display_names.return_value = ["Internal/Laptop"]
+
+    monitor = HdmiMonitor(
+        display_manager=mock_dm,
+        poll_interval=0.02,
+        on_status_change=on_change,
+    )
+    monitor_ref[0] = monitor
+    monitor.start()
+
+    try:
+        # Trigger status change
+        mock_dm.get_active_display_technologies.return_value = [6, 5]
+        mock_dm.is_hdmi_connected.return_value = True
+        mock_dm.get_active_display_names.return_value = ["Internal/Laptop", "HDMI"]
+
+        assert stopped_event.wait(timeout=1.0)
+        # Give a moment for loop to exit since stop_event was set
+        time.sleep(0.05)
+    finally:
+        monitor.stop(timeout=1.0)
+
+    assert monitor.is_running() is False
+
+
+def test_thread_restart_lifecycle():
+    mock_dm = MagicMock(spec=DisplayManager)
+    mock_dm.get_active_display_technologies.return_value = [6]
+    mock_dm.is_hdmi_connected.return_value = False
+    mock_dm.get_active_display_names.return_value = ["Internal/Laptop"]
+
+    monitor = HdmiMonitor(display_manager=mock_dm, poll_interval=0.02)
+    assert monitor.is_running() is False
+
+    # First cycle
+    monitor.start()
+    assert monitor.is_running() is True
+    monitor.stop(timeout=1.0)
+    assert monitor.is_running() is False
+
+    # Second cycle (restart)
+    monitor.start()
+    assert monitor.is_running() is True
+    monitor.stop(timeout=1.0)
+    assert monitor.is_running() is False
+
+
+def test_auto_restore_when_apply_mode_returns_failure(caplog):
+    mock_dm = MagicMock(spec=DisplayManager)
+    mock_dm.apply_mode.return_value = {"success": False, "error": "CCD failed"}
+
+    monitor = HdmiMonitor(display_manager=mock_dm, auto_restore=True)
+    monitor.current_mode = AppMode.PRESENTATION
+
+    mock_dm.get_active_display_technologies.return_value = [6]
+    mock_dm.is_hdmi_connected.return_value = False
+    mock_dm.get_active_display_names.return_value = ["Internal/Laptop"]
+
+    connected, names = monitor.poll_once()
+    assert connected is False
+    assert monitor.current_mode == AppMode.NORMAL
+    mock_dm.apply_mode.assert_called_once_with(AppMode.NORMAL)
+
+
+def test_status_change_dispatched_when_display_names_change():
+    mock_dm = MagicMock(spec=DisplayManager)
+    callbacks = []
+
+    def on_change(connected, names):
+        callbacks.append((connected, names))
+
+    mock_dm.get_active_display_technologies.return_value = [6, 5]
+    mock_dm.is_hdmi_connected.return_value = True
+    mock_dm.get_active_display_names.return_value = ["Internal/Laptop", "HDMI 1"]
+
+    monitor = HdmiMonitor(
+        display_manager=mock_dm,
+        on_status_change=on_change,
+    )
+    monitor.poll_once()
+    assert len(callbacks) == 0
+
+    # Same HDMI boolean (True), but display names changed (e.g. switched port/model)
+    mock_dm.get_active_display_names.return_value = ["Internal/Laptop", "HDMI 2"]
+    monitor.poll_once()
+
+    assert len(callbacks) == 1
+    assert callbacks[0] == (True, ["Internal/Laptop", "HDMI 2"])
+

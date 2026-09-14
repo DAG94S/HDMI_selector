@@ -126,13 +126,16 @@ class HdmiMonitor:
             thread = self._thread
 
         if thread is not None and thread.is_alive():
-            thread.join(timeout=timeout)
-            if thread.is_alive():
-                logger.warning(
-                    "HdmiMonitor thread did not stop within %.2f seconds.", timeout
-                )
+            if thread is not threading.current_thread():
+                thread.join(timeout=timeout)
+                if thread.is_alive():
+                    logger.warning(
+                        "HdmiMonitor thread did not stop within %.2f seconds.", timeout
+                    )
+                else:
+                    logger.info("HdmiMonitor thread stopped successfully.")
             else:
-                logger.info("HdmiMonitor thread stopped successfully.")
+                logger.info("HdmiMonitor stop called from worker thread; stop event set.")
 
     def poll_once(self) -> tuple[bool, list[str]]:
         """Checks current display status directly, fires callback if status changed,
@@ -146,7 +149,7 @@ class HdmiMonitor:
             is_connected = self.display_manager.is_hdmi_connected(technologies)
             display_names = self.display_manager.get_active_display_names(technologies)
         except Exception as e:
-            logger.error("Error querying display status: %s", e)
+            logger.error("Error querying display technologies in HdmiMonitor: %s", e)
             with self._lock:
                 return (
                     self._last_status if self._last_status is not None else False,
@@ -158,8 +161,9 @@ class HdmiMonitor:
 
         with self._lock:
             previous_status = self._last_status
-            status_changed = (
-                previous_status is not None and previous_status != is_connected
+            previous_names = self._last_display_names
+            status_changed = previous_status is not None and (
+                previous_status != is_connected or previous_names != display_names
             )
 
             self._last_status = is_connected
@@ -190,7 +194,11 @@ class HdmiMonitor:
                     "HDMI disconnected while in PRESENTATION mode; "
                     "auto-restoring NORMAL mode for safety."
                 )
-                self.display_manager.apply_mode(AppMode.NORMAL)
+                res = self.display_manager.apply_mode(AppMode.NORMAL)
+                if isinstance(res, dict) and not res.get("success", False):
+                    logger.warning(
+                        "Auto-restore apply_mode(NORMAL) was not successful: %s", res
+                    )
             except Exception as e:
                 logger.error("Error auto-restoring normal mode: %s", e)
 
