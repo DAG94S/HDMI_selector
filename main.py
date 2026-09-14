@@ -20,17 +20,24 @@ def build_parser() -> argparse.ArgumentParser:
         prog="hdmi-selector",
         description="HDMI Selector & OLED Saver - Gestor de pantallas y protector OLED",
     )
-    parser.add_argument(
+    action_group = parser.add_mutually_exclusive_group(required=False)
+    action_group.add_argument(
         "--status",
         action="store_true",
         help="Imprime el estado actual del sistema en formato JSON legible y sale.",
     )
-    parser.add_argument(
+    action_group.add_argument(
         "--mode",
         choices=["presentation", "exercises", "normal"],
         type=str.lower,
         help="Conmuta directamente la topología de pantalla y el estado del salvapantallas.",
     )
+    action_group.add_argument(
+        "--gui",
+        action="store_true",
+        help="Fuerza el lanzamiento explícito de la interfaz gráfica (GUI).",
+    )
+
     parser.add_argument(
         "--timeout",
         type=int,
@@ -38,14 +45,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Tiempo de inactividad para el salvapantallas en segundos (si aplica).",
     )
     parser.add_argument(
-        "--gui",
-        action="store_true",
-        help="Fuerza el lanzamiento explícito de la interfaz gráfica (GUI).",
-    )
-    parser.add_argument(
         "--json",
         action="store_true",
         help="Formatea la salida de consola estrictamente como JSON puro.",
+    )
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="Habilita logging detallado en nivel DEBUG.",
     )
     return parser
 
@@ -62,8 +70,25 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser = build_parser()
     try:
         args = parser.parse_args(argv)
+
+        # Validate dependent modifier flags
+        if args.timeout is not None:
+            if not args.mode:
+                parser.error("El argumento --timeout requiere especificar --mode.")
+            if args.timeout <= 0:
+                parser.error("El argumento --timeout debe ser un entero positivo mayor que cero.")
+
+        if args.json and not (args.mode or args.status):
+            parser.error("El argumento --json requiere especificar --mode o --status.")
     except SystemExit as exc:
         return exc.code if isinstance(exc.code, int) else 2
+
+    # Configure logging
+    log_level = logging.DEBUG if getattr(args, "verbose", False) else logging.INFO
+    logging.basicConfig(
+        level=log_level,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    )
 
     if args.status:
         try:
@@ -81,7 +106,10 @@ def main(argv: Optional[list[str]] = None) -> int:
             return 0
         except Exception as e:
             logger.error("Error al consultar el estado del sistema: %s", e)
-            print(f"Error al consultar el estado del sistema: {e}", file=sys.stderr)
+            if args.json:
+                print(json.dumps({"success": False, "error": str(e)}), file=sys.stderr)
+            else:
+                print(f"Error al consultar el estado del sistema: {e}", file=sys.stderr)
             return 1
 
     if args.mode:
@@ -107,7 +135,13 @@ def main(argv: Optional[list[str]] = None) -> int:
                 return 1
         except Exception as e:
             logger.error("Error al aplicar el modo '%s': %s", args.mode, e)
-            print(f"Error al aplicar el modo '{args.mode}': {e}", file=sys.stderr)
+            if args.json:
+                print(
+                    json.dumps({"success": False, "error": str(e)}, indent=2),
+                    file=sys.stderr,
+                )
+            else:
+                print(f"Error al aplicar el modo '{args.mode}': {e}", file=sys.stderr)
             return 1
 
     # Default mode or explicit --gui

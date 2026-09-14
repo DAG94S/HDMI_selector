@@ -278,4 +278,44 @@ def test_module_execution_runpy():
     assert exc.value.code == 0
 
 
+def test_mutually_exclusive_actions(capsys):
+    """Passing both --status and --mode triggers argparse error code 2."""
+    ret = main(["--status", "--mode", "presentation"])
+    assert ret == 2
+    captured = capsys.readouterr()
+    assert "not allowed with argument" in captured.err.lower()
+
+
+def test_orphaned_timeout_flag(capsys):
+    """Passing --timeout without --mode triggers validation error code 2."""
+    ret = main(["--timeout", "120"])
+    assert ret == 2
+    captured = capsys.readouterr()
+    assert "--timeout requiere especificar --mode" in captured.err
+
+
+def test_non_positive_timeout(capsys):
+    """Passing --timeout <= 0 triggers validation error code 2."""
+    ret = main(["--mode", "normal", "--timeout", "0"])
+    assert ret == 2
+    captured = capsys.readouterr()
+    assert "positivo mayor que cero" in captured.err
+
+
+def test_orphaned_json_flag(capsys):
+    """Passing --json alone without --mode or --status triggers validation error code 2."""
+    ret = main(["--json"])
+    assert ret == 2
+    captured = capsys.readouterr()
+    assert "--json requiere especificar --mode o --status" in captured.err
+
+
+def test_mode_normal_default_timeout(mock_display_manager):
+    """Test applying normal mode without --timeout does not pass timeout_seconds kwarg."""
+    ret = main(["--mode", "normal"])
+    assert ret == 0
+    mock_display_manager.apply_mode.assert_called_once_with(AppMode.NORMAL)
+
+
+
 
