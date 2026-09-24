@@ -35,7 +35,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     action_group.add_argument(
         "--mode",
-        choices=["presentation", "exercises", "normal"],
+        choices=["presentation", "teacher", "exercises", "normal"],
         type=str.lower,
         help="Conmuta directamente la topología de pantalla y el estado del salvapantallas.",
     )

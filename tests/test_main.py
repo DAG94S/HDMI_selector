@@ -73,6 +73,45 @@ def test_status_command_outputs_valid_json(mock_display_manager, mock_app_config
     assert data["screensaver"] == {"active": True, "timeout": 60}
     assert data["config"]["screensaver_timeout"] == mock_app_config.screensaver_timeout
     assert data["config"]["theme"] == "dark"
+    assert data["config"]["teacher_timeout_seconds"] == mock_app_config.teacher_timeout_seconds
+
+
+def test_mode_teacher(mock_display_manager, capsys):
+    """Test that --mode teacher invokes apply_mode(AppMode.TEACHER) and returns 0."""
+    mock_display_manager.apply_mode.return_value = {
+        "success": True,
+        "mode": AppMode.TEACHER,
+        "topology": "extend",
+        "screensaver": False,
+        "timeout": None,
+    }
+
+    ret = main(["--mode", "teacher"])
+    assert ret == 0
+
+    mock_display_manager.apply_mode.assert_called_once_with(AppMode.TEACHER)
+    captured = capsys.readouterr()
+    assert "teacher" in captured.out.lower()
+    assert captured.err == ""
+
+
+def test_mode_teacher_json(mock_display_manager, capsys):
+    """Test that --mode teacher --json returns valid JSON output."""
+    mock_display_manager.apply_mode.return_value = {
+        "success": True,
+        "mode": AppMode.TEACHER,
+        "topology": "extend",
+        "screensaver": False,
+        "timeout": None,
+    }
+
+    ret = main(["--mode", "teacher", "--json"])
+    assert ret == 0
+
+    captured = capsys.readouterr()
+    data = json.loads(captured.out)
+    assert data["success"] is True
+    assert data["mode"] == "teacher"
 
 
 def test_mode_presentation(mock_display_manager, capsys):
