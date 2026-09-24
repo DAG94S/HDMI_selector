@@ -463,7 +463,10 @@ class DisplayManager:
             }
         elif mode == AppMode.TEACHER:
             if not self.set_display_topology(SDC_TOPOLOGY_EXTEND):
-                logger.warning("Failed to switch topology to extend for teacher mode.")
+                logger.warning(
+                    "Failed to switch topology to extend for teacher mode; "
+                    "keeping screensaver active to protect OLED panel."
+                )
                 return {
                     "success": False,
                     "mode": mode,

@@ -35,30 +35,67 @@ def test_app_mode_teacher_enum_value():
     assert AppMode("teacher") == AppMode.TEACHER
 
 
-def test_apply_mode_teacher_success(mock_user32, mock_winreg):
-    dm = DisplayManager(user32=mock_user32, winreg_module=mock_winreg)
-    mock_user32.SetDisplayConfig.return_value = ERROR_SUCCESS
-    mock_user32.SystemParametersInfoW.return_value = 1
+def test_apply_mode_teacher_success():
+    dm = DisplayManager()
+    dm.set_display_topology = MagicMock(return_value=True)
+    dm.set_screensaver = MagicMock(return_value=True)
 
     result = dm.apply_mode(AppMode.TEACHER)
-    assert result["success"] is True
-    assert result["mode"] == AppMode.TEACHER
-    assert result["topology"] == "extend"
-    assert result["screensaver"] is False
+
+    dm.set_display_topology.assert_called_once_with(SDC_TOPOLOGY_EXTEND)
+    dm.set_screensaver.assert_called_once_with(active=False)
+    assert result == {
+        "success": True,
+        "mode": AppMode.TEACHER,
+        "topology": "extend",
+        "screensaver": False,
+        "timeout": None,
+    }
+    assert result["timeout"] is None
 
 
-def test_apply_mode_teacher_topology_failure(mock_user32, mock_winreg):
-    dm = DisplayManager(user32=mock_user32, winreg_module=mock_winreg)
-    mock_user32.SetDisplayConfig.return_value = 1  # Failure
+def test_apply_mode_teacher_topology_failure():
+    dm = DisplayManager()
+    dm.set_display_topology = MagicMock(return_value=False)
+    dm.set_screensaver = MagicMock()
 
     result = dm.apply_mode(AppMode.TEACHER)
-    assert result["success"] is False
-    assert result["mode"] == AppMode.TEACHER
-    assert result["topology"] is None
+
+    dm.set_screensaver.assert_not_called()
+    assert result == {
+        "success": False,
+        "mode": AppMode.TEACHER,
+        "topology": None,
+        "screensaver": None,
+        "timeout": None,
+    }
+    assert result["screensaver"] is None
+    assert result["timeout"] is None
+
+
+def test_apply_mode_guard_screensaver_on_teacher_failure():
+    dm = DisplayManager()
+    dm.set_display_topology = MagicMock(return_value=False)
+    dm.set_screensaver = MagicMock()
+
+    result = dm.apply_mode(AppMode.TEACHER)
+
+    # Screensaver must NOT be disabled to protect OLED panel
+    dm.set_screensaver.assert_not_called()
+    assert result == {
+        "success": False,
+        "mode": AppMode.TEACHER,
+        "topology": None,
+        "screensaver": None,
+        "timeout": None,
+    }
+    assert result["screensaver"] is None
+    assert result["timeout"] is None
 
 
 def test_constants_and_enum():
     assert AppMode.PRESENTATION == "presentation"
+    assert AppMode.TEACHER == "teacher"
     assert AppMode.EXERCISES == "exercises"
     assert AppMode.NORMAL == "normal"
 
@@ -244,6 +281,11 @@ def test_apply_mode_with_string_and_invalid_mode():
     assert res["mode"] == AppMode.PRESENTATION
     assert res["success"] is True
     assert res["timeout"] is None
+
+    res_teacher = dm.apply_mode("teacher")
+    assert res_teacher["mode"] == AppMode.TEACHER
+    assert res_teacher["success"] is True
+    assert res_teacher["timeout"] is None
 
     with pytest.raises(ValueError):
         dm.apply_mode("invalid_mode")
