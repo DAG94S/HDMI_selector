@@ -4,6 +4,7 @@ import pytest
 from HDMI_selector.core.display_manager import (
     AppMode,
     DisplayManager,
+    ERROR_SUCCESS,
     SDC_APPLY,
     SDC_TOPOLOGY_INTERNAL,
     SDC_TOPOLOGY_CLONE,
@@ -17,6 +18,43 @@ from HDMI_selector.core.display_manager import (
     SPIF_UPDATEINIFILE,
     SPIF_SENDCHANGE,
 )
+
+
+@pytest.fixture
+def mock_user32():
+    return MagicMock()
+
+
+@pytest.fixture
+def mock_winreg():
+    return MagicMock()
+
+
+def test_app_mode_teacher_enum_value():
+    assert AppMode.TEACHER.value == "teacher"
+    assert AppMode("teacher") == AppMode.TEACHER
+
+
+def test_apply_mode_teacher_success(mock_user32, mock_winreg):
+    dm = DisplayManager(user32=mock_user32, winreg_module=mock_winreg)
+    mock_user32.SetDisplayConfig.return_value = ERROR_SUCCESS
+    mock_user32.SystemParametersInfoW.return_value = 1
+
+    result = dm.apply_mode(AppMode.TEACHER)
+    assert result["success"] is True
+    assert result["mode"] == AppMode.TEACHER
+    assert result["topology"] == "extend"
+    assert result["screensaver"] is False
+
+
+def test_apply_mode_teacher_topology_failure(mock_user32, mock_winreg):
+    dm = DisplayManager(user32=mock_user32, winreg_module=mock_winreg)
+    mock_user32.SetDisplayConfig.return_value = 1  # Failure
+
+    result = dm.apply_mode(AppMode.TEACHER)
+    assert result["success"] is False
+    assert result["mode"] == AppMode.TEACHER
+    assert result["topology"] is None
 
 
 def test_constants_and_enum():
