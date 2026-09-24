@@ -13,7 +13,7 @@ class HdmiMonitor:
     """Monitors HDMI / external display connectivity in a background daemon thread.
 
     Provides status change callbacks and automatic fallback recovery when an external
-    display is disconnected while in presentation mode to protect the user from a blank screen.
+    display is disconnected while in presentation or teacher mode to protect the user from a blank screen.
     """
 
     def __init__(
@@ -31,7 +31,7 @@ class HdmiMonitor:
             on_status_change: Optional callback invoked with (is_connected, display_names)
                 when HDMI connection status changes.
             auto_restore: If True, automatically restores NORMAL mode when HDMI disconnects
-                while in PRESENTATION mode.
+                while in PRESENTATION or TEACHER mode.
         """
         if poll_interval <= 0:
             raise ValueError("poll_interval must be positive")
