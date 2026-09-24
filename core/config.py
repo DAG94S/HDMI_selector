@@ -20,6 +20,7 @@ class AppConfig:
         theme: UI theme ('dark' or 'light').
         poll_interval_seconds: Polling interval in seconds for device/monitor checks.
         auto_restore_on_disconnect: Whether to restore default display config when HDMI disconnects.
+        teacher_timeout_seconds: Inactivity timeout in seconds before dimming screen in teacher mode.
         config_path: Path to the JSON configuration file.
     """
 
@@ -28,6 +29,7 @@ class AppConfig:
     theme: str = "dark"
     poll_interval_seconds: int = 3
     auto_restore_on_disconnect: bool = True
+    teacher_timeout_seconds: int = 30
     config_path: str = DEFAULT_CONFIG_PATH
 
     def load(self) -> None:
@@ -60,6 +62,8 @@ class AppConfig:
             self.poll_interval_seconds = val
         if (val := data.get("auto_restore_on_disconnect")) is not None:
             self.auto_restore_on_disconnect = val
+        if (val := data.get("teacher_timeout_seconds")) is not None:
+            self.teacher_timeout_seconds = val
 
     def save(self) -> None:
         """Save the current configuration to the config file atomically.
@@ -73,6 +77,7 @@ class AppConfig:
             "theme": self.theme,
             "poll_interval_seconds": self.poll_interval_seconds,
             "auto_restore_on_disconnect": self.auto_restore_on_disconnect,
+            "teacher_timeout_seconds": self.teacher_timeout_seconds,
         }
         target_dir = os.path.dirname(os.path.abspath(self.config_path))
         os.makedirs(target_dir, exist_ok=True)

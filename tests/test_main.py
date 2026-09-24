@@ -71,7 +71,7 @@ def test_status_command_outputs_valid_json(mock_display_manager, mock_app_config
     assert data["is_hdmi_connected"] is True
     assert data["active_displays"] == ["Internal/Laptop", "HDMI"]
     assert data["screensaver"] == {"active": True, "timeout": 60}
-    assert data["config"]["screensaver_timeout"] == 60
+    assert data["config"]["screensaver_timeout"] == mock_app_config.screensaver_timeout
     assert data["config"]["theme"] == "dark"
 
 

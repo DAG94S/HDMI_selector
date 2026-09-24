@@ -102,3 +102,17 @@ def test_config_load_non_dict_json():
         cfg = AppConfig(config_path=config_path)
         cfg.load()
         assert cfg.screensaver_timeout == 60
+
+
+def test_teacher_timeout_seconds_default_and_persistence(tmp_path):
+    cfg_file = tmp_path / "config.json"
+    cfg = AppConfig(config_path=str(cfg_file))
+    assert cfg.teacher_timeout_seconds == 30
+
+    cfg.teacher_timeout_seconds = 15
+    cfg.save()
+
+    cfg2 = AppConfig(config_path=str(cfg_file))
+    cfg2.load()
+    assert cfg2.teacher_timeout_seconds == 15
+
