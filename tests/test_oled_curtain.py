@@ -13,6 +13,7 @@ from HDMI_selector.core.oled_curtain import (
     RECT,
     POINT,
     MONITORINFO,
+    _setup_api_signatures,
 )
 
 
@@ -152,7 +153,10 @@ def test_wake_and_blackout_state_changes_and_callbacks():
     curtain.blackout()
     assert curtain.is_blacked_out() is True
     assert state_changes == [True]
-    mock_user32.ShowWindow.assert_called_with(99999, 4)  # SW_SHOWNOACTIVATE
+    if hasattr(mock_user32, "ShowWindowAsync") and mock_user32.ShowWindowAsync.called:
+        mock_user32.ShowWindowAsync.assert_called_with(99999, 4)  # SW_SHOWNOACTIVATE
+    else:
+        mock_user32.ShowWindow.assert_called_with(99999, 4)
 
     # Redundant blackout should not fire duplicate callback
     curtain.blackout()
@@ -162,7 +166,10 @@ def test_wake_and_blackout_state_changes_and_callbacks():
     curtain.wake()
     assert curtain.is_blacked_out() is False
     assert state_changes == [True, False]
-    mock_user32.ShowWindow.assert_called_with(99999, 0)  # SW_HIDE
+    if hasattr(mock_user32, "ShowWindowAsync") and mock_user32.ShowWindowAsync.called:
+        mock_user32.ShowWindowAsync.assert_called_with(99999, 0)  # SW_HIDE
+    else:
+        mock_user32.ShowWindow.assert_called_with(99999, 0)
 
     # Redundant wake should not fire duplicate callback
     curtain.wake()
@@ -443,3 +450,72 @@ def test_real_windows_host_smoke_test():
     assert curtain.is_blacked_out() is False
     curtain.stop(timeout=1.0)
     assert curtain.is_running() is False
+
+
+def test_core_package_exports_oled_curtain():
+    """Verify that HDMI_selector.core exports OledCurtain in __all__."""
+    import HDMI_selector.core as core
+    from HDMI_selector.core import OledCurtain as CoreCurtain
+
+    assert CoreCurtain is OledCurtain
+    assert "OledCurtain" in core.__all__
+
+
+def test_stop_triggers_on_state_change_false_when_blacked_out():
+    """Verify calling stop() fires on_state_change(False) if curtain was blacked out."""
+    mock_user32 = MagicMock()
+    state_changes = []
+
+    curtain = OledCurtain(on_state_change=lambda s: state_changes.append(s), user32=mock_user32)
+    curtain.blackout()
+    assert state_changes == [True]
+    assert curtain.is_blacked_out() is True
+
+    # Stop while blacked out -> must notify False
+    curtain.stop(timeout=1.0)
+    assert state_changes == [True, False]
+    assert curtain.is_blacked_out() is False
+
+    # Stop while already awake -> should NOT notify False again
+    state_changes_awake = []
+    curtain_awake = OledCurtain(on_state_change=lambda s: state_changes_awake.append(s), user32=mock_user32)
+    curtain_awake.stop(timeout=1.0)
+    assert state_changes_awake == []
+
+
+def test_thread_restart_lifecycle():
+    """Verify OledCurtain can be started, stopped, restarted, and stopped cleanly."""
+    mock_user32 = MagicMock()
+    curtain = OledCurtain(poll_interval=0.01, user32=mock_user32)
+
+    # 1st cycle
+    assert curtain.is_running() is False
+    curtain.start()
+    assert curtain.is_running() is True
+    time.sleep(0.02)
+    curtain.stop(timeout=1.0)
+    assert curtain.is_running() is False
+
+    # 2nd cycle (restart)
+    curtain.start()
+    assert curtain.is_running() is True
+    time.sleep(0.02)
+    curtain.stop(timeout=1.0)
+    assert curtain.is_running() is False
+
+
+def test_setup_api_signatures_guard():
+    """Verify _setup_api_signatures sets flag on user32 and skips repeat reflection."""
+    class FakeUser32:
+        pass
+
+    fake_user32 = FakeUser32()
+    assert getattr(fake_user32, "_signatures_configured", False) is False
+
+    _setup_api_signatures(fake_user32)
+    assert getattr(fake_user32, "_signatures_configured", False) is True
+
+    # Call again; reflection should return early without inspecting new attributes
+    fake_user32.CreateWindowExW = MagicMock()
+    _setup_api_signatures(fake_user32)
+    fake_user32.CreateWindowExW.assert_not_called()

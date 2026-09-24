@@ -88,7 +88,7 @@ _WNDPROC_HOLDER: Optional[WNDPROC] = None
 
 def _setup_api_signatures(user32) -> None:
     """Configures ctypes argument and return types for user32 APIs on 64-bit Windows."""
-    if user32 is None:
+    if user32 is None or getattr(user32, "_signatures_configured", False):
         return
     try:
         # Only configure real ctypes functions, not Mock objects
@@ -116,6 +116,10 @@ def _setup_api_signatures(user32) -> None:
         if hasattr(user32, "ShowWindow") and not getattr(user32.ShowWindow, "_mock_name", None):
             user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
             user32.ShowWindow.restype = wintypes.BOOL
+
+        if hasattr(user32, "ShowWindowAsync") and not getattr(user32.ShowWindowAsync, "_mock_name", None):
+            user32.ShowWindowAsync.argtypes = [wintypes.HWND, ctypes.c_int]
+            user32.ShowWindowAsync.restype = wintypes.BOOL
 
         if hasattr(user32, "DestroyWindow") and not getattr(user32.DestroyWindow, "_mock_name", None):
             user32.DestroyWindow.argtypes = [wintypes.HWND]
@@ -158,6 +162,11 @@ def _setup_api_signatures(user32) -> None:
         if gdi32 and hasattr(gdi32, "GetStockObject") and not getattr(gdi32.GetStockObject, "_mock_name", None):
             gdi32.GetStockObject.argtypes = [ctypes.c_int]
             gdi32.GetStockObject.restype = wintypes.HBRUSH
+
+        try:
+            setattr(user32, "_signatures_configured", True)
+        except Exception:
+            pass
     except Exception as e:
         logger.debug("Failed to setup ctypes API signatures for user32: %s", e)
 
@@ -263,6 +272,7 @@ class OledCurtain:
 
         self._lock = threading.RLock()
         self._stop_event = threading.Event()
+        self._ready_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
 
         self._hwnd: Optional[int] = None
@@ -376,7 +386,7 @@ class OledCurtain:
                 return
 
             self._stop_event.clear()
-            self._init_window()
+            self._ready_event.clear()
             self._last_activity_time = time.time()
             self._last_cursor_pos = self.get_cursor_pos()
 
@@ -386,11 +396,20 @@ class OledCurtain:
                 daemon=True,
             )
             self._thread.start()
-            logger.info("OledCurtain started with timeout=%ds, poll_interval=%.2fs", self._timeout_seconds, self._poll_interval)
+
+        # Wait for worker thread to finish creating window before returning
+        self._ready_event.wait(timeout=2.0)
+        logger.info("OledCurtain started with timeout=%ds, poll_interval=%.2fs", self._timeout_seconds, self._poll_interval)
 
     def stop(self, timeout: float = 2.0) -> None:
         """Destroys blackout window and cleanly stops background polling thread."""
+        callback = None
         with self._lock:
+            was_blacked_out = self._is_blacked_out
+            self._is_blacked_out = False
+            if was_blacked_out:
+                callback = self.on_state_change
+
             self._stop_event.set()
             thread = self._thread
             self._thread = None
@@ -403,9 +422,14 @@ class OledCurtain:
                 else:
                     logger.info("OledCurtain thread stopped successfully.")
 
-        with self._lock:
-            self._is_blacked_out = False
-            self._destroy_window()
+        # Ensure window is destroyed if thread was never started or didn't destroy it
+        self._destroy_window()
+
+        if callback is not None:
+            try:
+                callback(False)
+            except Exception as e:
+                logger.exception("Error in on_state_change callback during stop: %s", e)
 
     def poll_once(self, now: Optional[float] = None) -> None:
         """Executes a single cursor check and state evaluation cycle."""
@@ -445,6 +469,13 @@ class OledCurtain:
     def _run(self) -> None:
         """Background thread worker loop."""
         logger.debug("OledCurtain background loop starting.")
+        try:
+            self._init_window()
+        except Exception as e:
+            logger.error("Error creating curtain window in worker thread: %s", e)
+        finally:
+            self._ready_event.set()
+
         while not self._stop_event.is_set():
             try:
                 self._pump_messages()
@@ -454,6 +485,11 @@ class OledCurtain:
 
             if self._stop_event.wait(timeout=self.poll_interval):
                 break
+
+        try:
+            self._destroy_window()
+        except Exception as e:
+            logger.error("Error destroying curtain window in worker thread: %s", e)
 
         logger.debug("OledCurtain background loop finished.")
 
@@ -502,19 +538,21 @@ class OledCurtain:
                 None,
             )
             if hwnd:
-                self._hwnd = hwnd
+                with self._lock:
+                    self._hwnd = hwnd
                 logger.debug("OledCurtain window created: hwnd=%s rect=(%d,%d,%d,%d)", hwnd, left, top, width, height)
         except Exception as e:
             logger.debug("Win32 window creation failed (fallback headless): %s", e)
 
     def _show_window(self) -> None:
-        """Shows the blackout window on the primary monitor."""
+        """Shows the blackout window on the primary monitor asynchronously."""
         if self._hwnd and self._user32:
             try:
                 left, top, right, bottom = self.get_primary_monitor_rect()
                 width = right - left
                 height = bottom - top
                 if hasattr(self._user32, "SetWindowPos"):
+                    # 0x4000 is SWP_ASYNCWINDOWPOS to avoid cross-thread blocking
                     self._user32.SetWindowPos(
                         self._hwnd,
                         HWND_TOPMOST,
@@ -522,33 +560,38 @@ class OledCurtain:
                         top,
                         width,
                         height,
-                        SWP_NOACTIVATE | SWP_SHOWWINDOW,
+                        0x4000 | SWP_NOACTIVATE | SWP_SHOWWINDOW,
                     )
-                if hasattr(self._user32, "ShowWindow"):
+                if hasattr(self._user32, "ShowWindowAsync"):
+                    self._user32.ShowWindowAsync(self._hwnd, SW_SHOWNOACTIVATE)
+                elif hasattr(self._user32, "ShowWindow"):
                     self._user32.ShowWindow(self._hwnd, SW_SHOWNOACTIVATE)
-                if hasattr(self._user32, "UpdateWindow"):
-                    self._user32.UpdateWindow(self._hwnd)
             except Exception as e:
                 logger.debug("Error showing curtain window: %s", e)
 
     def _hide_window(self) -> None:
-        """Hides the blackout window."""
+        """Hides the blackout window asynchronously."""
         if self._hwnd and self._user32:
             try:
-                if hasattr(self._user32, "ShowWindow"):
+                if hasattr(self._user32, "ShowWindowAsync"):
+                    self._user32.ShowWindowAsync(self._hwnd, SW_HIDE)
+                elif hasattr(self._user32, "ShowWindow"):
                     self._user32.ShowWindow(self._hwnd, SW_HIDE)
             except Exception as e:
                 logger.debug("Error hiding curtain window: %s", e)
 
     def _destroy_window(self) -> None:
         """Destroys the blackout window."""
-        if self._hwnd and self._user32:
+        with self._lock:
+            hwnd = self._hwnd
+            self._hwnd = None
+
+        if hwnd and self._user32:
             try:
                 if hasattr(self._user32, "DestroyWindow"):
-                    self._user32.DestroyWindow(self._hwnd)
+                    self._user32.DestroyWindow(hwnd)
             except Exception as e:
                 logger.debug("Error destroying curtain window: %s", e)
-            self._hwnd = None
 
     def _pump_messages(self) -> None:
         """Dispatches any pending messages for the curtain window."""
