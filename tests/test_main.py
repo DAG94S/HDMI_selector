@@ -41,6 +41,7 @@ def mock_app_config():
             poll_interval_seconds=3,
             auto_restore_on_disconnect=True,
         )
+        cfg_inst.load = MagicMock()
         mock_cfg_cls.return_value = cfg_inst
         yield cfg_inst
 
@@ -356,5 +357,16 @@ def test_mode_normal_default_timeout(mock_display_manager):
     mock_display_manager.apply_mode.assert_called_once_with(AppMode.NORMAL)
 
 
+def test_mode_teacher_case_insensitive(mock_display_manager, capsys):
+    """Test that --mode TEACHER with uppercase input correctly maps to AppMode.TEACHER."""
+    mock_display_manager.apply_mode.return_value = {
+        "success": True,
+        "mode": AppMode.TEACHER,
+        "topology": "extend",
+        "screensaver": False,
+        "timeout": None,
+    }
 
-
+    ret = main(["--mode", "TEACHER"])
+    assert ret == 0
+    mock_display_manager.apply_mode.assert_called_once_with(AppMode.TEACHER)

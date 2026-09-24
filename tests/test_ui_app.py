@@ -53,10 +53,36 @@ def mock_monitor(mock_display_manager):
     return mon
 
 
+def _safe_destroy(app):
+    """Safely cancels all pending Tcl after callbacks and destroys the app."""
+    try:
+        if app and getattr(app, "tk", None):
+            for after_id in app.tk.call("after", "info"):
+                try:
+                    app.after_cancel(after_id)
+                except Exception:
+                    pass
+            app.destroy()
+    except Exception:
+        pass
+
+
+def _create_app(**kwargs):
+    """Instantiates HdmiSelectorApp with retry to handle Windows Tcl teardown latency."""
+    import time
+    for attempt in range(3):
+        try:
+            return HdmiSelectorApp(**kwargs)
+        except Exception:
+            if attempt == 2:
+                raise
+            time.sleep(0.15)
+
+
 @pytest.fixture
 def app_instance(mock_config, mock_display_manager, mock_monitor):
     """Creates a HdmiSelectorApp instance with withdrawn window and mock deps."""
-    app = HdmiSelectorApp(
+    app = _create_app(
         config=mock_config,
         display_manager=mock_display_manager,
         monitor=mock_monitor,
@@ -64,13 +90,7 @@ def app_instance(mock_config, mock_display_manager, mock_monitor):
         withdraw=True,
     )
     yield app
-    try:
-        app.destroy()
-        del app
-        import gc
-        gc.collect()
-    except Exception:
-        pass
+    _safe_destroy(app)
 
 
 class TestHdmiSelectorAppInit:
@@ -86,13 +106,13 @@ class TestHdmiSelectorAppInit:
             mon_instance.current_mode = AppMode.NORMAL
             mon_instance.poll_once.return_value = (False, ["Internal/Laptop"])
 
-            app = HdmiSelectorApp(start_monitor=False, withdraw=True)
+            app = _create_app(start_monitor=False, withdraw=True)
             try:
                 assert isinstance(app.config, AppConfig)
                 assert isinstance(app.display_manager, DisplayManager)
                 assert app.monitor == mon_instance
             finally:
-                app.destroy()
+                _safe_destroy(app)
 
     def test_init_with_mocked_dependencies(self, app_instance, mock_config, mock_display_manager, mock_monitor):
         """App initializes with supplied dependencies and wires monitor callback."""
@@ -108,7 +128,7 @@ class TestHdmiSelectorAppInit:
     def test_start_monitor_called_if_not_running(self, mock_config, mock_display_manager, mock_monitor):
         """If start_monitor is True and monitor is not running, start() is called."""
         mock_monitor.is_running.return_value = False
-        app = HdmiSelectorApp(
+        app = _create_app(
             config=mock_config,
             display_manager=mock_display_manager,
             monitor=mock_monitor,
@@ -118,7 +138,7 @@ class TestHdmiSelectorAppInit:
         try:
             mock_monitor.start.assert_called_once()
         finally:
-            app.destroy()
+            _safe_destroy(app)
 
 
 class TestHdmiSelectorAppModeSelection:
@@ -349,7 +369,7 @@ class TestHdmiSelectorAppEdgeCases:
             config_path=str(tmp_path / "custom.json"),
         )
         mock_monitor.current_mode = AppMode.EXERCISES
-        app = HdmiSelectorApp(
+        app = _create_app(
             config=cfg,
             display_manager=mock_display_manager,
             monitor=mock_monitor,
@@ -363,7 +383,7 @@ class TestHdmiSelectorAppEdgeCases:
             ex_card = app.mode_cards[AppMode.EXERCISES]
             assert ex_card["badge"].cget("text") == "[ACTIVO]"
         finally:
-            app.destroy()
+            _safe_destroy(app)
 
     def test_select_mode_exception_handled(self, app_instance, mock_display_manager, mocker):
         """If apply_mode raises an unexpected exception, UI shows error dialog and returns dict."""
@@ -404,7 +424,7 @@ class TestHdmiSelectorAppEdgeCases:
         mock_monitor.current_mode = None
         mock_display_manager.is_hdmi_connected.return_value = False
 
-        app = HdmiSelectorApp(
+        app = _create_app(
             config=cfg,
             display_manager=mock_display_manager,
             monitor=mock_monitor,
@@ -416,7 +436,7 @@ class TestHdmiSelectorAppEdgeCases:
             normal_card = app.mode_cards[AppMode.NORMAL]
             assert normal_card["badge"].cget("text") == "[ACTIVO]"
         finally:
-            app.destroy()
+            _safe_destroy(app)
 
     def test_destroy_stops_running_monitor(self, tmp_path, mock_display_manager):
         """Direct call to destroy() stops a running monitor thread."""
@@ -427,14 +447,14 @@ class TestHdmiSelectorAppEdgeCases:
         mon.current_mode = AppMode.NORMAL
         mon.is_running.return_value = True
 
-        app = HdmiSelectorApp(
+        app = _create_app(
             config=cfg,
             display_manager=mock_display_manager,
             monitor=mon,
             start_monitor=False,
             withdraw=True,
         )
-        app.destroy()
+        _safe_destroy(app)
         mon.stop.assert_called_once()
 
     def test_center_window_calls_geometry(self, app_instance):
