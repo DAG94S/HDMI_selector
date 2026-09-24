@@ -3,6 +3,7 @@
 from HDMI_selector.core.config import AppConfig
 from HDMI_selector.core.display_manager import AppMode, DisplayManager
 from HDMI_selector.core.hdmi_monitor import HdmiMonitor
+from HDMI_selector.core.oled_curtain import OledCurtain
 
-__all__ = ["AppConfig", "AppMode", "DisplayManager", "HdmiMonitor"]
+__all__ = ["AppConfig", "AppMode", "DisplayManager", "HdmiMonitor", "OledCurtain"]
 
