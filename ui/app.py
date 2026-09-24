@@ -11,6 +11,7 @@ import customtkinter as ctk
 from HDMI_selector.core.config import AppConfig
 from HDMI_selector.core.display_manager import AppMode, DisplayManager
 from HDMI_selector.core.hdmi_monitor import HdmiMonitor
+from HDMI_selector.core.oled_curtain import OledCurtain
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +31,16 @@ class HdmiSelectorApp(ctk.CTk):
         300: "5 min",
         600: "10 min",
     }
+    TEACHER_TIMEOUT_OPTIONS: dict[str, int] = {
+        "15 seg": 15,
+        "30 seg": 30,
+        "1 min": 60,
+    }
+    TEACHER_TIMEOUT_SECONDS_TO_CHOICE: dict[int, str] = {
+        15: "15 seg",
+        30: "30 seg",
+        60: "1 min",
+    }
     THEME_OPTIONS: dict[str, str] = {
         "Oscuro": "dark",
         "Claro": "light",
@@ -44,6 +55,7 @@ class HdmiSelectorApp(ctk.CTk):
         config: Optional[AppConfig] = None,
         display_manager: Optional[DisplayManager] = None,
         monitor: Optional[HdmiMonitor] = None,
+        teacher_curtain: Optional[OledCurtain] = None,
         start_monitor: bool = True,
         withdraw: bool = False,
     ) -> None:
@@ -53,6 +65,7 @@ class HdmiSelectorApp(ctk.CTk):
             config: Optional AppConfig instance. If None, creates and loads default.
             display_manager: Optional DisplayManager. If None, creates default.
             monitor: Optional HdmiMonitor. If None, creates default.
+            teacher_curtain: Optional OledCurtain instance. If None, creates default.
             start_monitor: If True, starts the background monitor thread.
             withdraw: If True, withdraws window immediately (used in headless/tests).
         """
@@ -79,13 +92,19 @@ class HdmiSelectorApp(ctk.CTk):
         self.monitor = monitor
         self.monitor.on_status_change = self._on_hdmi_status_threadsafe
 
+        if teacher_curtain is None:
+            teacher_curtain = OledCurtain(
+                timeout_seconds=self.config.teacher_timeout_seconds
+            )
+        self.teacher_curtain: Optional[OledCurtain] = teacher_curtain
+
         # Set appearance and styling
         ctk.set_appearance_mode(self.config.theme)
         ctk.set_default_color_theme("blue")
 
         self.title("🖥️ HDMI Selector & OLED Saver")
-        self.minsize(480, 600)
-        self._center_window(540, 660)
+        self.minsize(480, 680)
+        self._center_window(540, 750)
         self.protocol("WM_DELETE_WINDOW", self._on_closing)
 
         # Dictionary tracking card widgets
@@ -109,7 +128,7 @@ class HdmiSelectorApp(ctk.CTk):
             if self.monitor.current_mode is not None
             else self._parse_mode(self.config.default_mode)
         )
-        if initial_mode == AppMode.PRESENTATION and not self.is_hdmi_connected:
+        if initial_mode in (AppMode.PRESENTATION, AppMode.TEACHER) and not self.is_hdmi_connected:
             initial_mode = AppMode.NORMAL
 
         self.monitor.current_mode = initial_mode
@@ -129,7 +148,7 @@ class HdmiSelectorApp(ctk.CTk):
             return self.monitor.last_display_names
         return self.display_manager.get_active_display_names()
 
-    def _center_window(self, width: int = 540, height: int = 660) -> None:
+    def _center_window(self, width: int = 540, height: int = 750) -> None:
         """Centers the window on the active display work area using native geometry."""
         try:
             if hasattr(ctypes, "windll"):
@@ -250,6 +269,12 @@ class HdmiSelectorApp(ctk.CTk):
                 "Activar Presentación",
             ),
             (
+                AppMode.TEACHER,
+                "Modo Docente (Clase interactiva)",
+                "Diapositivas al 100% en proyector (HDMI extendido). Pantalla OLED apagada en reposo; se despierta al mover el mouse en la laptop y se apaga tras inactividad.",
+                "Activar Modo Docente",
+            ),
+            (
                 AppMode.EXERCISES,
                 "Modo Ejercicios",
                 "Escritorio extendido para resolver ejercicios con alumnos. Ambas pantallas encendidas. Salvapantallas en pausa.",
@@ -330,7 +355,7 @@ class HdmiSelectorApp(ctk.CTk):
         )
         footer_title.pack(anchor="w", padx=14, pady=(10, 4))
 
-        # First row: screensaver timeout dropdown and theme dropdown
+        # First row: screensaver timeout dropdown and teacher timeout dropdown
         row1 = ctk.CTkFrame(self.footer_frame, fg_color="transparent")
         row1.pack(fill="x", padx=14, pady=4)
 
@@ -348,15 +373,38 @@ class HdmiSelectorApp(ctk.CTk):
         self.timeout_menu = ctk.CTkOptionMenu(
             row1,
             values=list(self.TIMEOUT_OPTIONS.keys()),
-            width=100,
+            width=90,
             command=self._on_timeout_selected,
         )
         self.timeout_menu.set(initial_timeout_choice)
         self.timeout_menu.pack(side="left", padx=(0, 16))
 
-        # Theme Selector
-        lbl_theme = ctk.CTkLabel(
+        # Teacher Mode Timeout
+        lbl_teacher_timeout = ctk.CTkLabel(
             row1,
+            text="Reposo Docente:",
+            font=ctk.CTkFont(size=12),
+        )
+        lbl_teacher_timeout.pack(side="left", padx=(0, 6))
+
+        initial_teacher_choice = self.TEACHER_TIMEOUT_SECONDS_TO_CHOICE.get(
+            self.config.teacher_timeout_seconds, "30 seg"
+        )
+        self.teacher_timeout_menu = ctk.CTkOptionMenu(
+            row1,
+            values=list(self.TEACHER_TIMEOUT_OPTIONS.keys()),
+            width=90,
+            command=self._on_teacher_timeout_selected,
+        )
+        self.teacher_timeout_menu.set(initial_teacher_choice)
+        self.teacher_timeout_menu.pack(side="left")
+
+        # Second row: Theme selector and Auto-restore switch
+        row2 = ctk.CTkFrame(self.footer_frame, fg_color="transparent")
+        row2.pack(fill="x", padx=14, pady=(4, 12))
+
+        lbl_theme = ctk.CTkLabel(
+            row2,
             text="Tema:",
             font=ctk.CTkFont(size=12),
         )
@@ -364,17 +412,13 @@ class HdmiSelectorApp(ctk.CTk):
 
         initial_theme_choice = self.THEME_MAP_REVERSE.get(self.config.theme, "Oscuro")
         self.theme_menu = ctk.CTkOptionMenu(
-            row1,
+            row2,
             values=["Oscuro", "Claro"],
-            width=100,
+            width=90,
             command=self._on_theme_changed,
         )
         self.theme_menu.set(initial_theme_choice)
-        self.theme_menu.pack(side="left")
-
-        # Second row: Auto-restore switch
-        row2 = ctk.CTkFrame(self.footer_frame, fg_color="transparent")
-        row2.pack(fill="x", padx=14, pady=(4, 12))
+        self.theme_menu.pack(side="left", padx=(0, 16))
 
         self.auto_restore_var = ctk.BooleanVar(value=self.config.auto_restore_on_disconnect)
         self.auto_restore_switch = ctk.CTkSwitch(
@@ -398,12 +442,15 @@ class HdmiSelectorApp(ctk.CTk):
         if isinstance(mode, str):
             mode = self._parse_mode(mode)
 
-        # Confirm before activating presentation mode if HDMI is not connected
-        if mode == AppMode.PRESENTATION and not self.is_hdmi_connected:
+        # Confirm before activating presentation or teacher mode if HDMI is not connected
+        if mode in (AppMode.PRESENTATION, AppMode.TEACHER) and not self.is_hdmi_connected:
+            mode_desc = (
+                "Modo Docente" if mode == AppMode.TEACHER else "Modo Presentación"
+            )
             proceed = messagebox.askyesno(
                 "Confirmación HDMI",
                 "No se detecta ningún monitor HDMI o pantalla externa conectada.\n\n"
-                "Si activa el Modo Presentación, la pantalla de la laptop se apagará.\n"
+                f"Si activa el {mode_desc}, la pantalla de la laptop se apagará.\n"
                 "¿Está seguro de que desea continuar?",
                 parent=self,
             )
@@ -428,6 +475,15 @@ class HdmiSelectorApp(ctk.CTk):
                 parent=self,
             )
             return res
+
+        # Curtain lifecycle management for Teacher Mode
+        if mode == AppMode.TEACHER:
+            if hasattr(self, "teacher_curtain") and self.teacher_curtain is not None:
+                if not self.teacher_curtain.is_running():
+                    self.teacher_curtain.start()
+        else:
+            if hasattr(self, "teacher_curtain") and self.teacher_curtain is not None:
+                self.teacher_curtain.stop()
 
         self.monitor.current_mode = mode
         self._update_mode_cards_visual(mode)
@@ -465,6 +521,13 @@ class HdmiSelectorApp(ctk.CTk):
                 return
         except Exception:
             return
+
+        if not connected:
+            if hasattr(self, "teacher_curtain") and self.teacher_curtain is not None:
+                try:
+                    self.teacher_curtain.stop()
+                except Exception as e:
+                    logger.warning("Error stopping teacher curtain on HDMI disconnect: %s", e)
 
         self._update_hdmi_status_ui(connected, names)
 
@@ -512,6 +575,15 @@ class HdmiSelectorApp(ctk.CTk):
         if self.monitor.current_mode == AppMode.NORMAL:
             self.display_manager.set_screensaver(active=True, timeout_seconds=seconds)
 
+    def _on_teacher_timeout_selected(self, choice: str) -> None:
+        """Handles teacher mode timeout selection change."""
+        seconds = self.TEACHER_TIMEOUT_OPTIONS.get(choice, 30)
+        self.config.teacher_timeout_seconds = seconds
+        self.config.save()
+
+        if hasattr(self, "teacher_curtain") and self.teacher_curtain is not None:
+            self.teacher_curtain.timeout_seconds = seconds
+
     def _on_auto_restore_toggled(self) -> None:
         """Handles auto-restore switch toggle."""
         val = bool(self.auto_restore_var.get())
@@ -527,7 +599,13 @@ class HdmiSelectorApp(ctk.CTk):
         self.config.save()
 
     def _on_closing(self) -> None:
-        """Window close handler: stops monitor, saves config, and destroys window."""
+        """Window close handler: stops curtain, monitor, saves config, and destroys window."""
+        try:
+            if hasattr(self, "teacher_curtain") and self.teacher_curtain is not None:
+                self.teacher_curtain.stop()
+        except Exception as e:
+            logger.warning("Error stopping teacher curtain during close: %s", e)
+
         try:
             if self.monitor is not None:
                 self.monitor.stop()
@@ -542,7 +620,13 @@ class HdmiSelectorApp(ctk.CTk):
         self.destroy()
 
     def destroy(self) -> None:
-        """Cancels any pending after timers, stops monitor, and safely destroys the window."""
+        """Cancels any pending after timers, stops curtain & monitor, and safely destroys the window."""
+        try:
+            if hasattr(self, "teacher_curtain") and self.teacher_curtain is not None:
+                self.teacher_curtain.stop()
+        except Exception as e:
+            logger.debug("Error stopping teacher curtain during destroy: %s", e)
+
         try:
             if hasattr(self, "monitor") and self.monitor is not None and self.monitor.is_running():
                 self.monitor.stop()

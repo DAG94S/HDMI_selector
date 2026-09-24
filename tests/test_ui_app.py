@@ -8,6 +8,7 @@ import customtkinter
 from HDMI_selector.core.config import AppConfig
 from HDMI_selector.core.display_manager import AppMode, DisplayManager
 from HDMI_selector.core.hdmi_monitor import HdmiMonitor
+from HDMI_selector.core.oled_curtain import OledCurtain
 from HDMI_selector.ui.app import HdmiSelectorApp
 
 
@@ -53,16 +54,28 @@ def mock_monitor(mock_display_manager):
     return mon
 
 
+@pytest.fixture
+def mock_curtain():
+    """Provides a mocked OledCurtain."""
+    curtain = Mock(spec=OledCurtain)
+    curtain.is_running.return_value = False
+    curtain.timeout_seconds = 30
+    return curtain
+
+
 def _safe_destroy(app):
     """Safely cancels all pending Tcl after callbacks and destroys the app."""
     try:
-        if app and getattr(app, "tk", None):
-            for after_id in app.tk.call("after", "info"):
-                try:
-                    app.after_cancel(after_id)
-                except Exception:
-                    pass
-            app.destroy()
+        if app:
+            if getattr(app, "teacher_curtain", None) and hasattr(app.teacher_curtain, "is_running") and app.teacher_curtain.is_running():
+                app.teacher_curtain.stop()
+            if getattr(app, "tk", None):
+                for after_id in app.tk.call("after", "info"):
+                    try:
+                        app.after_cancel(after_id)
+                    except Exception:
+                        pass
+                app.destroy()
     except Exception:
         pass
 
@@ -86,6 +99,21 @@ def app_instance(mock_config, mock_display_manager, mock_monitor):
         config=mock_config,
         display_manager=mock_display_manager,
         monitor=mock_monitor,
+        start_monitor=False,
+        withdraw=True,
+    )
+    yield app
+    _safe_destroy(app)
+
+
+@pytest.fixture
+def app_with_curtain(mock_config, mock_display_manager, mock_monitor, mock_curtain):
+    """Creates a HdmiSelectorApp instance with injected mock_curtain."""
+    app = _create_app(
+        config=mock_config,
+        display_manager=mock_display_manager,
+        monitor=mock_monitor,
+        teacher_curtain=mock_curtain,
         start_monitor=False,
         withdraw=True,
     )
@@ -474,4 +502,148 @@ class TestHdmiSelectorAppEdgeCases:
             mock_geom.assert_called_once()
             geom_str = mock_geom.call_args[0][0]
             assert "540x660" in geom_str
+
+
+class TestHdmiSelectorAppTeacherMode:
+    """Tests for Teacher Mode (Modo Docente) and OLED curtain integration in HdmiSelectorApp."""
+
+    def test_mode_card_teacher_exists(self, app_instance):
+        """AppMode.TEACHER exists in app.mode_cards with proper text and button."""
+        assert AppMode.TEACHER in app_instance.mode_cards
+        teacher_card = app_instance.mode_cards[AppMode.TEACHER]
+        assert teacher_card["default_button_text"] == "Activar Modo Docente"
+        assert teacher_card["button"].cget("text") == "Activar Modo Docente"
+
+    def test_select_mode_teacher_when_connected(
+        self, app_with_curtain, mock_display_manager, mock_monitor, mock_config, mock_curtain
+    ):
+        """Selecting AppMode.TEACHER when HDMI connected applies mode, updates cards, and starts curtain."""
+        mock_monitor.last_status = True
+        mock_display_manager.apply_mode.return_value = {
+            "success": True,
+            "mode": AppMode.TEACHER,
+            "topology": "extend",
+            "screensaver": False,
+        }
+
+        res = app_with_curtain.select_mode(AppMode.TEACHER)
+
+        assert res.get("success") is True
+        mock_display_manager.apply_mode.assert_called_with(
+            AppMode.TEACHER, timeout_seconds=mock_config.screensaver_timeout
+        )
+        assert mock_monitor.current_mode == AppMode.TEACHER
+        assert mock_config.default_mode == "teacher"
+
+        # Check visual card state
+        teacher_card = app_with_curtain.mode_cards[AppMode.TEACHER]
+        assert teacher_card["badge"].cget("text") == "[ACTIVO]"
+        assert teacher_card["button"].cget("state") == "disabled"
+
+        # Verify curtain was started
+        mock_curtain.start.assert_called_once()
+
+    def test_switch_from_teacher_to_normal_stops_curtain(
+        self, app_with_curtain, mock_display_manager, mock_monitor, mock_curtain
+    ):
+        """Switching from AppMode.TEACHER to AppMode.NORMAL calls teacher_curtain.stop()."""
+        mock_monitor.current_mode = AppMode.TEACHER
+        mock_curtain.is_running.return_value = True
+
+        res = app_with_curtain.select_mode(AppMode.NORMAL)
+
+        assert res.get("success") is True
+        mock_curtain.stop.assert_called_once()
+        assert mock_monitor.current_mode == AppMode.NORMAL
+
+    def test_hdmi_disconnect_stops_curtain(self, app_with_curtain, mock_curtain):
+        """Disconnecting HDMI stops teacher_curtain if it was running."""
+        mock_curtain.is_running.return_value = True
+
+        app_with_curtain._on_hdmi_status_changed(False, ["Internal/Laptop"])
+
+        mock_curtain.stop.assert_called_once()
+
+    def test_on_closing_stops_curtain(self, app_with_curtain, mock_curtain, mocker):
+        """Closing the window calls teacher_curtain.stop()."""
+        mock_curtain.is_running.return_value = True
+        mocker.patch.object(app_with_curtain, "destroy")
+
+        app_with_curtain._on_closing()
+
+        mock_curtain.stop.assert_called_once()
+
+    def test_destroy_stops_curtain(self, app_with_curtain, mock_curtain):
+        """Calling destroy() calls teacher_curtain.stop()."""
+        mock_curtain.is_running.return_value = True
+
+        app_with_curtain.destroy()
+
+        mock_curtain.stop.assert_called_once()
+
+    def test_teacher_timeout_dropdown_updates_config_and_curtain(
+        self, app_with_curtain, mock_config, mock_curtain
+    ):
+        """Selecting teacher timeout in dropdown updates config.teacher_timeout_seconds and curtain."""
+        assert hasattr(app_with_curtain, "teacher_timeout_menu")
+
+        app_with_curtain._on_teacher_timeout_selected("15 seg")
+        assert mock_config.teacher_timeout_seconds == 15
+        assert mock_curtain.timeout_seconds == 15
+
+        app_with_curtain._on_teacher_timeout_selected("1 min")
+        assert mock_config.teacher_timeout_seconds == 60
+        assert mock_curtain.timeout_seconds == 60
+
+    def test_select_mode_teacher_unconnected_cancel(
+        self, app_with_curtain, mock_display_manager, mock_monitor, mock_curtain, mocker
+    ):
+        """Selecting teacher mode when disconnected prompts user; cancelling aborts without starting curtain."""
+        mock_monitor.last_status = False
+        mock_display_manager.is_hdmi_connected.return_value = False
+        mock_askyesno = mocker.patch("tkinter.messagebox.askyesno", return_value=False)
+
+        res = app_with_curtain.select_mode(AppMode.TEACHER)
+
+        mock_askyesno.assert_called_once()
+        mock_display_manager.apply_mode.assert_not_called()
+        mock_curtain.start.assert_not_called()
+        assert res.get("cancelled") is True
+        assert mock_monitor.current_mode != AppMode.TEACHER
+
+    def test_select_mode_teacher_unconnected_confirm(
+        self, app_with_curtain, mock_display_manager, mock_monitor, mock_curtain, mocker
+    ):
+        """Selecting teacher mode when disconnected prompts user; confirming applies mode and starts curtain."""
+        mock_monitor.last_status = False
+        mock_display_manager.is_hdmi_connected.return_value = False
+        mock_askyesno = mocker.patch("tkinter.messagebox.askyesno", return_value=True)
+
+        res = app_with_curtain.select_mode(AppMode.TEACHER)
+
+        mock_askyesno.assert_called_once()
+        mock_display_manager.apply_mode.assert_called_with(
+            AppMode.TEACHER, timeout_seconds=app_with_curtain.config.screensaver_timeout
+        )
+        assert mock_monitor.current_mode == AppMode.TEACHER
+        mock_curtain.start.assert_called_once()
+
+    def test_default_teacher_curtain_initialization(
+        self, mock_config, mock_display_manager, mock_monitor
+    ):
+        """HdmiSelectorApp initializes default OledCurtain with config timeout if not injected."""
+        app = _create_app(
+            config=mock_config,
+            display_manager=mock_display_manager,
+            monitor=mock_monitor,
+            start_monitor=False,
+            withdraw=True,
+        )
+        try:
+            assert hasattr(app, "teacher_curtain")
+            assert isinstance(app.teacher_curtain, OledCurtain)
+            assert app.teacher_curtain.timeout_seconds == mock_config.teacher_timeout_seconds
+        finally:
+            _safe_destroy(app)
+
 
