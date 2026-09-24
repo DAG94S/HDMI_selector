@@ -437,3 +437,21 @@ class TestHdmiSelectorAppEdgeCases:
         app.destroy()
         mon.stop.assert_called_once()
 
+    def test_center_window_calls_geometry(self, app_instance):
+        """_center_window uses native geometry and maintains proper window dimensions."""
+        with patch.object(app_instance, "geometry") as mock_geom:
+            app_instance._center_window(540, 660)
+            mock_geom.assert_called_once()
+            geom_str = mock_geom.call_args[0][0]
+            assert "540x660" in geom_str
+            assert "+" in geom_str
+
+    def test_center_window_fallback_on_win32_failure(self, app_instance):
+        """_center_window falls back cleanly when win32 raises an exception."""
+        with patch("ctypes.windll.user32.GetCursorPos", side_effect=RuntimeError("Win32 error")), \
+             patch.object(app_instance, "geometry") as mock_geom:
+            app_instance._center_window(540, 660)
+            mock_geom.assert_called_once()
+            geom_str = mock_geom.call_args[0][0]
+            assert "540x660" in geom_str
+

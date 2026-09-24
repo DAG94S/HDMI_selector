@@ -1,6 +1,8 @@
 """Modern graphical user interface for HDMI Selector & OLED Saver."""
 
+import ctypes
 import logging
+from ctypes import wintypes
 from tkinter import messagebox
 from typing import Any, Optional
 
@@ -82,8 +84,8 @@ class HdmiSelectorApp(ctk.CTk):
         ctk.set_default_color_theme("blue")
 
         self.title("🖥️ HDMI Selector & OLED Saver")
-        self.geometry("540x660")
         self.minsize(480, 600)
+        self._center_window(540, 660)
         self.protocol("WM_DELETE_WINDOW", self._on_closing)
 
         # Dictionary tracking card widgets
@@ -126,6 +128,57 @@ class HdmiSelectorApp(ctk.CTk):
         if self.monitor.last_display_names:
             return self.monitor.last_display_names
         return self.display_manager.get_active_display_names()
+
+    def _center_window(self, width: int = 540, height: int = 660) -> None:
+        """Centers the window on the active display work area using native geometry."""
+        try:
+            if hasattr(ctypes, "windll"):
+                user32 = ctypes.windll.user32
+                point = wintypes.POINT()
+                if user32.GetCursorPos(ctypes.byref(point)):
+                    hmon = user32.MonitorFromPoint(point, 2)  # MONITOR_DEFAULTTONEAREST
+                else:
+                    hmon = None
+
+                if hmon:
+                    class MONITORINFO(ctypes.Structure):
+                        _fields_ = [
+                            ("cbSize", wintypes.DWORD),
+                            ("rcMonitor", wintypes.RECT),
+                            ("rcWork", wintypes.RECT),
+                            ("dwFlags", wintypes.DWORD),
+                        ]
+
+                    mi = MONITORINFO()
+                    mi.cbSize = ctypes.sizeof(MONITORINFO)
+                    if user32.GetMonitorInfoW(hmon, ctypes.byref(mi)):
+                        work = mi.rcWork
+                        work_w = work.right - work.left
+                        work_h = work.bottom - work.top
+                        scaling = getattr(self, "_get_window_scaling", lambda: 1.0)()
+                        scaled_w = int(width * scaling)
+                        scaled_h = int(height * scaling)
+                        x = work.left + max(0, (work_w - scaled_w) // 2)
+                        y = work.top + max(0, (work_h - scaled_h) // 2)
+                        self.geometry(f"{width}x{height}+{x}+{y}")
+                        return
+        except Exception as e:
+            logger.debug("Win32 monitor centering fallback: %s", e)
+
+        # Fallback to Tkinter screen metrics
+        try:
+            self.update_idletasks()
+            sw = self.winfo_screenwidth()
+            sh = self.winfo_screenheight()
+            scaling = getattr(self, "_get_window_scaling", lambda: 1.0)()
+            scaled_w = int(width * scaling)
+            scaled_h = int(height * scaling)
+            x = max(0, (sw - scaled_w) // 2)
+            y = max(0, (sh - scaled_h) // 2)
+            self.geometry(f"{width}x{height}+{x}+{y}")
+        except Exception as e:
+            logger.debug("Tk geometry centering fallback: %s", e)
+            self.geometry(f"{width}x{height}")
 
     def _parse_mode(self, mode_val: str) -> AppMode:
         """Parses a mode string into an AppMode enum safely."""

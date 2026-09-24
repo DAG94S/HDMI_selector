@@ -4,8 +4,15 @@ import argparse
 from dataclasses import asdict
 import json
 import logging
+import os
 import sys
 from typing import Optional
+
+# Permite ejecutar como script directo: `python HDMI_selector/main.py`
+# o `python main.py` dentro de la carpeta, además de `-m HDMI_selector.main`.
+_repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _repo_root not in sys.path:
+    sys.path.insert(0, _repo_root)
 
 from HDMI_selector.core.config import AppConfig
 from HDMI_selector.core.display_manager import AppMode, DisplayManager
