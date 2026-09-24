@@ -204,6 +204,39 @@ def test_auto_restore_when_presentation_mode_and_disconnects():
     mock_dm.apply_mode.assert_not_called()
 
 
+def test_auto_restore_when_teacher_mode_and_disconnects():
+    """Verify that disconnecting HDMI in TEACHER mode automatically restores NORMAL mode."""
+    mock_dm = MagicMock(spec=DisplayManager)
+    mock_dm.apply_mode.return_value = {"success": True, "mode": AppMode.NORMAL}
+
+    monitor = HdmiMonitor(display_manager=mock_dm, auto_restore=True)
+
+    # 1. Connected in TEACHER mode
+    mock_dm.is_hdmi_connected.return_value = True
+    mock_dm.get_active_display_names.return_value = ["Internal/Laptop", "HDMI"]
+    monitor.poll_once()
+
+    monitor.current_mode = AppMode.TEACHER
+
+    # 2. HDMI disconnects
+    mock_dm.is_hdmi_connected.return_value = False
+    mock_dm.get_active_display_names.return_value = ["Internal/Laptop"]
+
+    connected, names = monitor.poll_once()
+
+    assert connected is False
+    # Safety restore triggered automatically
+    mock_dm.apply_mode.assert_called_once_with(AppMode.NORMAL)
+    # Mode updated to NORMAL
+    assert monitor.current_mode == AppMode.NORMAL
+
+    # 3. Subsequent poll while disconnected does not re-trigger apply_mode
+    mock_dm.apply_mode.reset_mock()
+    monitor.poll_once()
+    mock_dm.apply_mode.assert_not_called()
+
+
+
 def test_auto_restore_disabled():
     mock_dm = MagicMock(spec=DisplayManager)
     monitor = HdmiMonitor(display_manager=mock_dm, auto_restore=False)

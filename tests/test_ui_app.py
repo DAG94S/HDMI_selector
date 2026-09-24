@@ -466,6 +466,69 @@ class TestHdmiSelectorAppEdgeCases:
         finally:
             _safe_destroy(app)
 
+    def test_startup_with_teacher_mode_starts_curtain(
+        self, tmp_path, mock_display_manager, mock_monitor
+    ):
+        """If default_mode is teacher and HDMI is connected, app starts teacher_curtain."""
+        cfg = AppConfig(
+            default_mode="teacher",
+            config_path=str(tmp_path / "teach_cfg.json"),
+        )
+        mock_monitor.last_status = True
+        mock_monitor.current_mode = None
+        mock_display_manager.is_hdmi_connected.return_value = True
+
+        mock_curtain = Mock(spec=OledCurtain)
+        mock_curtain.is_running.return_value = False
+        mock_curtain.timeout_seconds = 30
+
+        app = _create_app(
+            config=cfg,
+            display_manager=mock_display_manager,
+            monitor=mock_monitor,
+            teacher_curtain=mock_curtain,
+            start_monitor=False,
+            withdraw=True,
+        )
+        try:
+            assert app.monitor.current_mode == AppMode.TEACHER
+            teach_card = app.mode_cards[AppMode.TEACHER]
+            assert teach_card["badge"].cget("text") == "[ACTIVO]"
+            mock_curtain.start.assert_called_once()
+        finally:
+            _safe_destroy(app)
+
+    def test_startup_fallback_from_teacher_when_no_hdmi(
+        self, tmp_path, mock_display_manager, mock_monitor
+    ):
+        """If default_mode is teacher but HDMI is disconnected, fallback to NORMAL without starting curtain."""
+        cfg = AppConfig(
+            default_mode="teacher",
+            config_path=str(tmp_path / "teach_no_hdmi.json"),
+        )
+        mock_monitor.last_status = False
+        mock_monitor.current_mode = None
+        mock_display_manager.is_hdmi_connected.return_value = False
+
+        mock_curtain = Mock(spec=OledCurtain)
+        mock_curtain.is_running.return_value = False
+
+        app = _create_app(
+            config=cfg,
+            display_manager=mock_display_manager,
+            monitor=mock_monitor,
+            teacher_curtain=mock_curtain,
+            start_monitor=False,
+            withdraw=True,
+        )
+        try:
+            assert app.monitor.current_mode == AppMode.NORMAL
+            normal_card = app.mode_cards[AppMode.NORMAL]
+            assert normal_card["badge"].cget("text") == "[ACTIVO]"
+            mock_curtain.start.assert_not_called()
+        finally:
+            _safe_destroy(app)
+
     def test_destroy_stops_running_monitor(self, tmp_path, mock_display_manager):
         """Direct call to destroy() stops a running monitor thread."""
         cfg = AppConfig(config_path=str(tmp_path / "destroy_cfg.json"))

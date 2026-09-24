@@ -134,6 +134,11 @@ class HdmiSelectorApp(ctk.CTk):
         self.monitor.current_mode = initial_mode
         self._update_mode_cards_visual(initial_mode)
 
+        if initial_mode == AppMode.TEACHER and self.teacher_curtain is not None:
+            if not self.teacher_curtain.is_running():
+                self.teacher_curtain.start()
+
+
     @property
     def is_hdmi_connected(self) -> bool:
         """Returns True if HDMI or external display is currently active."""
@@ -444,18 +449,22 @@ class HdmiSelectorApp(ctk.CTk):
 
         # Confirm before activating presentation or teacher mode if HDMI is not connected
         if mode in (AppMode.PRESENTATION, AppMode.TEACHER) and not self.is_hdmi_connected:
-            mode_desc = (
-                "Modo Docente" if mode == AppMode.TEACHER else "Modo Presentación"
-            )
+            if mode == AppMode.TEACHER:
+                mode_desc = "Modo Docente"
+                effect_desc = "la pantalla de la laptop se apagará automáticamente tras inactividad."
+            else:
+                mode_desc = "Modo Presentación"
+                effect_desc = "la pantalla de la laptop se apagará de inmediato."
             proceed = messagebox.askyesno(
                 "Confirmación HDMI",
                 "No se detecta ningún monitor HDMI o pantalla externa conectada.\n\n"
-                f"Si activa el {mode_desc}, la pantalla de la laptop se apagará.\n"
+                f"Si activa el {mode_desc}, {effect_desc}\n"
                 "¿Está seguro de que desea continuar?",
                 parent=self,
             )
             if not proceed:
                 return {"success": False, "cancelled": True}
+
 
         try:
             res = self.display_manager.apply_mode(

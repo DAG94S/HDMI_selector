@@ -174,10 +174,11 @@ class HdmiMonitor:
 
             if (
                 self.auto_restore
-                and self._current_mode == AppMode.PRESENTATION
+                and self._current_mode in (AppMode.PRESENTATION, AppMode.TEACHER)
                 and not is_connected
             ):
                 should_auto_restore = True
+                prev_mode = self._current_mode
                 self._current_mode = AppMode.NORMAL
 
         # Invoke callback outside lock to prevent deadlocks
@@ -191,8 +192,9 @@ class HdmiMonitor:
         if should_auto_restore:
             try:
                 logger.info(
-                    "HDMI disconnected while in PRESENTATION mode; "
-                    "auto-restoring NORMAL mode for safety."
+                    "HDMI disconnected while in %s mode; "
+                    "auto-restoring NORMAL mode for safety.",
+                    prev_mode.value if isinstance(prev_mode, AppMode) else prev_mode,
                 )
                 res = self.display_manager.apply_mode(AppMode.NORMAL)
                 if isinstance(res, dict) and not res.get("success", False):
