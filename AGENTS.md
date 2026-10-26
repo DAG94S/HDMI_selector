@@ -78,6 +78,21 @@ HDMI_selector/
 - Si se destruye la ventana sin cancelar esos timers, los callbacks se ejecutan en el siguiente intérprete Tcl y causan errores `TclError: invalid command name` o conflictos de compartición de archivos (`sharing violation`).
 - **Patrón obligatorio en tests:** Usar el helper `_safe_destroy(app)` que recorre `app.tk.call('after', 'info')` y cancela cada uno con `app.after_cancel(after_id)` antes de invocar `app.destroy()`.
 
+### F. Detección de HDMI y Cambios de Topología
+- La detección de HDMI usa `QDC_ALL_PATHS` + `targetAvailable`: con `QDC_ONLY_ACTIVE_PATHS` el HDMI es invisible en modo `NORMAL`.
+- Un error de `QueryDisplayConfig` devuelve `None` (desconocido), **nunca** "desconectado". `HdmiMonitor` ignora `None`, exige 2 sondeos consecutivos desconectados y respeta un periodo de gracia tras `notify_mode_change()`; Windows reporta el HDMI ausente durante el cambio de topología.
+- `apply_mode()` devuelve `topology_ok` / `screensaver_ok`; `success` equivale a `topology_ok`. `set_display_topology` reintenta y verifica (bloquea varios segundos).
+
+### G. Hilos en la GUI
+- `select_mode` y `refresh_status` corren en segundo plano (`_run_in_background`) y entregan resultados por una `queue.Queue` que se vacía con `after(50)`. Nunca llamar `after()` ni tocar widgets desde otros hilos.
+- La GUI y el auto-restore se excluyen mediante `HdmiMonitor.mode_lock`.
+- El telón se arranca solo cuando se conoce la topología real (`_on_detected_mode`) o tras aplicar Docente con éxito, y se detiene **antes** de aplicar otro modo.
+- En tests, el ejecutor es síncrono y se usa `app.process_pending()` para vaciar la cola.
+
+### H. Telón OLED
+- La clase de ventana se registra una sola vez por proceso y el `WNDPROC` se conserva siempre (re-registrar libera el thunk y provoca crashes).
+- El monitor interno se identifica por nombre de dispositivo GDI, no por geometría (sin DPI awareness las coordenadas difieren).
+
 ---
 
 ## 5. Comandos de Verificación y Compilación

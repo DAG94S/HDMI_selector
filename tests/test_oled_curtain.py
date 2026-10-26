@@ -519,3 +519,303 @@ def test_setup_api_signatures_guard():
     fake_user32.CreateWindowExW = MagicMock()
     _setup_api_signatures(fake_user32)
     fake_user32.CreateWindowExW.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Reliability: class registration, thread-owned window, internal monitor
+# ---------------------------------------------------------------------------
+
+import HDMI_selector.core.oled_curtain as oc_module
+from HDMI_selector.core.oled_curtain import (
+    MONITORINFOEXW,
+    WM_CLOSE,
+    ERROR_CLASS_ALREADY_EXISTS,
+    enumerate_monitors,
+    _ensure_window_class,
+)
+
+
+def _registered_for(user32):
+    return [proc for owner, proc in oc_module._REGISTERED_CLASSES if owner is user32]
+
+
+def test_window_class_registered_once_across_restarts():
+    mock_user32 = MagicMock()
+    curtain = OledCurtain(poll_interval=0.01, user32=mock_user32)
+
+    for _ in range(3):
+        curtain.start()
+        assert curtain.is_running() is True
+        curtain.stop(timeout=1.0)
+        assert curtain.is_running() is False
+
+    assert mock_user32.RegisterClassW.call_count == 1
+    assert mock_user32.CreateWindowExW.call_count == 3
+    # WNDPROC thunk kept alive for the whole process
+    procs = _registered_for(mock_user32)
+    assert len(procs) == 1
+    assert isinstance(procs[0], oc_module.WNDPROC)
+
+
+def test_window_class_shared_between_instances():
+    mock_user32 = MagicMock()
+    for _ in range(2):
+        curtain = OledCurtain(poll_interval=0.01, user32=mock_user32)
+        curtain.start()
+        curtain.stop(timeout=1.0)
+    assert mock_user32.RegisterClassW.call_count == 1
+
+
+def test_register_class_already_exists_is_tolerated():
+    mock_user32 = MagicMock()
+    mock_user32.RegisterClassW.return_value = 0
+    with patch.object(oc_module, "_get_last_error", return_value=ERROR_CLASS_ALREADY_EXISTS):
+        assert _ensure_window_class(mock_user32) is True
+    assert len(_registered_for(mock_user32)) == 1
+    # Second call does not re-register
+    assert _ensure_window_class(mock_user32) is True
+    assert mock_user32.RegisterClassW.call_count == 1
+
+
+def test_register_class_failure_runs_headless():
+    mock_user32 = MagicMock()
+    mock_user32.RegisterClassW.return_value = 0
+    with patch.object(oc_module, "_get_last_error", return_value=5):
+        assert _ensure_window_class(mock_user32) is False
+        curtain = OledCurtain(poll_interval=0.01, user32=mock_user32)
+        curtain.start()
+        curtain.stop(timeout=1.0)
+    mock_user32.CreateWindowExW.assert_not_called()
+    assert _registered_for(mock_user32) == []
+
+
+def test_destroy_window_runs_only_on_curtain_thread():
+    mock_user32 = MagicMock()
+    mock_user32.CreateWindowExW.return_value = 4242
+    destroy_threads = []
+    mock_user32.DestroyWindow.side_effect = lambda hwnd: destroy_threads.append(
+        threading.current_thread().name
+    ) or 1
+
+    curtain = OledCurtain(poll_interval=0.01, user32=mock_user32)
+    curtain.start()
+    assert curtain._hwnd == 4242
+    curtain.stop(timeout=1.0)
+
+    assert destroy_threads == ["OledCurtainThread"]
+    mock_user32.DestroyWindow.assert_called_once_with(4242)
+    assert curtain._hwnd is None
+
+
+def test_destroy_window_from_foreign_thread_posts_wm_close():
+    mock_user32 = MagicMock()
+    curtain = OledCurtain(user32=mock_user32)
+    curtain._hwnd = 777
+    curtain._window_thread_ident = -1  # some other thread owns it
+
+    curtain._destroy_window()
+
+    mock_user32.DestroyWindow.assert_not_called()
+    mock_user32.PostMessageW.assert_called_once_with(777, WM_CLOSE, 0, 0)
+    assert curtain._hwnd is None
+
+
+def test_stop_is_bounded_when_thread_is_stuck():
+    mock_user32 = MagicMock()
+    mock_user32.CreateWindowExW.return_value = 99
+    release = threading.Event()
+    entered = threading.Event()
+
+    def blocking_cursor(pt_ptr):
+        if threading.current_thread().name == "OledCurtainThread":
+            entered.set()
+            release.wait(5.0)
+        return 0
+
+    mock_user32.GetCursorPos.side_effect = blocking_cursor
+    curtain = OledCurtain(poll_interval=0.01, user32=mock_user32)
+    curtain.start()
+    try:
+        assert entered.wait(1.0)
+        t0 = time.monotonic()
+        curtain.stop(timeout=10.0)  # clamped to <= 1 s
+        elapsed = time.monotonic() - t0
+        assert elapsed < 1.5
+        assert curtain.is_running() is False
+        # Window closed asynchronously by its owner thread, never destroyed cross-thread
+        mock_user32.PostMessageW.assert_called_with(99, WM_CLOSE, 0, 0)
+        mock_user32.DestroyWindow.assert_not_called()
+    finally:
+        release.set()
+    # The stuck thread eventually exits and destroys its own window
+    deadline = time.monotonic() + 2.0
+    while not mock_user32.DestroyWindow.called and time.monotonic() < deadline:
+        time.sleep(0.01)
+    mock_user32.DestroyWindow.assert_called_once_with(99)
+
+
+def test_restart_while_previous_thread_stuck_does_not_revive_old_thread():
+    mock_user32 = MagicMock()
+    release = threading.Event()
+    entered = threading.Event()
+    threads_seen = set()
+
+    def cursor(pt_ptr):
+        t = threading.current_thread()
+        if t.name == "OledCurtainThread":
+            threads_seen.add(t.ident)
+            if len(threads_seen) == 1:
+                entered.set()
+                release.wait(3.0)
+        return 0
+
+    mock_user32.GetCursorPos.side_effect = cursor
+    curtain = OledCurtain(poll_interval=0.01, user32=mock_user32)
+    curtain.start()
+    assert entered.wait(1.0)
+    old_thread = curtain._thread
+    curtain.stop(timeout=0.1)
+    curtain.start()
+    release.set()
+    old_thread.join(2.0)
+    # Old thread exits (its own stop event stays set) while the new one keeps running
+    assert old_thread.is_alive() is False
+    assert curtain.is_running() is True
+    curtain.stop(timeout=1.0)
+
+
+def _fake_monitor_user32(monitors):
+    """monitors: list of (device, rect, is_primary)."""
+    mock_user32 = MagicMock()
+
+    def enum(hdc, rect, proc, lparam):
+        for i in range(len(monitors)):
+            proc(i + 1, None, None, 0)
+        return 1
+
+    def info(hmon, mi_ptr):
+        device, rect, primary = monitors[int(hmon) - 1]
+        mi = mi_ptr._obj
+        mi.rcMonitor = RECT(*rect)
+        mi.dwFlags = 1 if primary else 0
+        if isinstance(mi, MONITORINFOEXW):
+            mi.szDevice = device
+        return 1
+
+    mock_user32.EnumDisplayMonitors.side_effect = enum
+    mock_user32.GetMonitorInfoW.side_effect = info
+    mock_user32.MonitorFromPoint.return_value = 1  # primary = first monitor
+    return mock_user32
+
+
+PROJECTOR_PRIMARY = [
+    ("\\\\.\\DISPLAY2", (0, 0, 1920, 1080), True),       # projector set as primary
+    ("\\\\.\\DISPLAY1", (-2880, 0, 0, 1800), False),     # laptop OLED panel
+]
+
+
+def test_enumerate_monitors():
+    mock_user32 = _fake_monitor_user32(PROJECTOR_PRIMARY)
+    assert enumerate_monitors(mock_user32) == PROJECTOR_PRIMARY
+
+    failing = MagicMock()
+    failing.EnumDisplayMonitors.side_effect = RuntimeError("x")
+    assert enumerate_monitors(failing) == []
+
+
+def test_curtain_covers_internal_monitor_not_primary():
+    mock_user32 = _fake_monitor_user32(PROJECTOR_PRIMARY)
+    curtain = OledCurtain(
+        user32=mock_user32,
+        internal_device_provider=lambda: ["\\\\.\\display1"],  # case-insensitive
+    )
+    assert curtain.get_monitor_rect() == (-2880, 0, 0, 1800)
+    assert curtain.get_primary_monitor_rect() == (0, 0, 1920, 1080)
+
+    # Window is shown on the laptop panel
+    curtain._hwnd = 5
+    curtain.blackout()
+    args = mock_user32.SetWindowPos.call_args.args
+    assert args[2:6] == (-2880, 0, 2880, 1800)
+
+
+def test_cursor_wake_uses_internal_monitor_bounds():
+    mock_user32 = _fake_monitor_user32(PROJECTOR_PRIMARY)
+    curtain = OledCurtain(
+        timeout_seconds=30,
+        user32=mock_user32,
+        internal_device_provider=lambda: ["\\\\.\\DISPLAY1"],
+    )
+    curtain.blackout()
+    curtain._last_activity_time = 1000.0
+    curtain._last_cursor_pos = (100, 100)
+
+    # Moving on the projector (primary monitor) must not wake the laptop panel
+    with patch.object(curtain, "get_cursor_pos", return_value=(200, 100)):
+        curtain.poll_once(now=1010.0)
+    assert curtain.is_blacked_out() is True
+    assert curtain.last_activity_time == 1000.0
+
+    # Moving on the laptop panel wakes it
+    with patch.object(curtain, "get_cursor_pos", return_value=(-1000, 500)):
+        curtain.poll_once(now=1011.0)
+    assert curtain.is_blacked_out() is False
+    assert curtain.last_activity_time == 1011.0
+
+
+@pytest.mark.parametrize(
+    "provider",
+    [lambda: None, lambda: [], lambda: ["\\\\.\\DISPLAY9"], MagicMock(side_effect=RuntimeError("x"))],
+)
+def test_curtain_falls_back_to_primary(provider):
+    mock_user32 = _fake_monitor_user32(PROJECTOR_PRIMARY)
+    curtain = OledCurtain(user32=mock_user32, internal_device_provider=provider)
+    assert curtain.get_monitor_rect() == (0, 0, 1920, 1080)
+
+
+def test_monitor_bounds_refreshed_on_each_start():
+    mock_user32 = _fake_monitor_user32(PROJECTOR_PRIMARY)
+    provider = MagicMock(return_value=["\\\\.\\DISPLAY1"])
+    curtain = OledCurtain(poll_interval=0.01, user32=mock_user32, internal_device_provider=provider)
+
+    curtain.start()
+    curtain.stop(timeout=1.0)
+    first = provider.call_count
+    provider.return_value = None  # laptop panel no longer active -> primary
+    curtain.start()
+    curtain.stop(timeout=1.0)
+
+    assert provider.call_count > first
+    assert curtain.get_monitor_rect() == (0, 0, 1920, 1080)
+
+
+def test_periodic_refresh_repositions_visible_curtain():
+    mock_user32 = _fake_monitor_user32(PROJECTOR_PRIMARY)
+    names = [["\\\\.\\DISPLAY2"]]
+    curtain = OledCurtain(user32=mock_user32, internal_device_provider=lambda: names[0])
+    assert curtain.get_monitor_rect() == (0, 0, 1920, 1080)
+    curtain._hwnd = 5
+    curtain.blackout()
+    mock_user32.SetWindowPos.reset_mock()
+
+    names[0] = ["\\\\.\\DISPLAY1"]
+    curtain._rect_refreshed_at = 0.0  # force refresh due
+    curtain._maybe_refresh_monitor_rect()
+
+    assert curtain.get_monitor_rect() == (-2880, 0, 0, 1800)
+    assert mock_user32.SetWindowPos.call_args.args[2:6] == (-2880, 0, 2880, 1800)
+
+
+def test_injected_user32_has_no_default_display_provider():
+    curtain = OledCurtain(user32=MagicMock())
+    assert curtain._internal_device_provider is None
+
+
+def test_stop_never_calls_destroy_from_caller_when_thread_finished():
+    mock_user32 = MagicMock()
+    mock_user32.CreateWindowExW.return_value = 31337
+    curtain = OledCurtain(poll_interval=0.01, user32=mock_user32)
+    curtain.start()
+    curtain.stop(timeout=1.0)
+    curtain.stop(timeout=1.0)  # idempotent
+    mock_user32.DestroyWindow.assert_called_once_with(31337)

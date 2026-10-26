@@ -18,7 +18,7 @@ def test_config_defaults_and_save_load():
 
         # Mutate all 5 fields
         cfg.screensaver_timeout = 120
-        cfg.default_mode = "game"
+        cfg.default_mode = "teacher"
         cfg.theme = "light"
         cfg.poll_interval_seconds = 5
         cfg.auto_restore_on_disconnect = False
@@ -32,7 +32,7 @@ def test_config_defaults_and_save_load():
         cfg2 = AppConfig(config_path=config_path)
         cfg2.load()
         assert cfg2.screensaver_timeout == 120
-        assert cfg2.default_mode == "game"
+        assert cfg2.default_mode == "teacher"
         assert cfg2.theme == "light"
         assert cfg2.poll_interval_seconds == 5
         assert cfg2.auto_restore_on_disconnect is False
@@ -116,3 +116,69 @@ def test_teacher_timeout_seconds_default_and_persistence(tmp_path):
     cfg2.load()
     assert cfg2.teacher_timeout_seconds == 15
 
+
+
+def _write_config(tmp_path, data):
+    cfg_file = tmp_path / "config.json"
+    cfg_file.write_text(json.dumps(data), encoding="utf-8")
+    return str(cfg_file)
+
+
+def test_load_invalid_types_fall_back_per_field(tmp_path):
+    path = _write_config(tmp_path, {
+        "screensaver_timeout": "120",          # wrong type
+        "default_mode": "game",                # unknown mode
+        "theme": 5,                            # wrong type
+        "poll_interval_seconds": 0,            # out of range
+        "auto_restore_on_disconnect": "yes",   # wrong type
+        "teacher_timeout_seconds": -3,         # out of range
+    })
+    cfg = AppConfig(config_path=path)
+    cfg.load()
+
+    assert cfg.screensaver_timeout == 60
+    assert cfg.default_mode == "normal"
+    assert cfg.theme == "dark"
+    assert cfg.poll_interval_seconds == 3
+    assert cfg.auto_restore_on_disconnect is True
+    assert cfg.teacher_timeout_seconds == 30
+
+
+def test_load_rejects_bools_as_ints_and_huge_values(tmp_path):
+    path = _write_config(tmp_path, {
+        "screensaver_timeout": True,
+        "teacher_timeout_seconds": 10**9,
+        "poll_interval_seconds": False,
+    })
+    cfg = AppConfig(config_path=path)
+    cfg.load()
+    assert cfg.screensaver_timeout == 60
+    assert cfg.teacher_timeout_seconds == 30
+    assert cfg.poll_interval_seconds == 3
+
+
+def test_load_mixed_valid_and_invalid_fields(tmp_path):
+    path = _write_config(tmp_path, {
+        "screensaver_timeout": 300,
+        "default_mode": "PRESENTATION",
+        "theme": "light",
+        "poll_interval_seconds": 1.5,
+        "auto_restore_on_disconnect": False,
+        "teacher_timeout_seconds": "abc",
+    })
+    cfg = AppConfig(config_path=path)
+    cfg.load()
+    assert cfg.screensaver_timeout == 300
+    assert cfg.default_mode == "presentation"
+    assert cfg.theme == "light"
+    assert cfg.poll_interval_seconds == 1.5
+    assert cfg.auto_restore_on_disconnect is False
+    assert cfg.teacher_timeout_seconds == 30
+
+
+def test_load_all_valid_modes(tmp_path):
+    for mode in ("presentation", "teacher", "exercises", "normal"):
+        path = _write_config(tmp_path, {"default_mode": mode})
+        cfg = AppConfig(config_path=path)
+        cfg.load()
+        assert cfg.default_mode == mode

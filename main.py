@@ -1,6 +1,7 @@
 """Main launcher and CLI entry point for HDMI Selector & OLED Saver."""
 
 import argparse
+import ctypes
 from dataclasses import asdict
 import json
 import logging
@@ -19,6 +20,48 @@ from HDMI_selector.core.display_manager import AppMode, DisplayManager
 from HDMI_selector.ui.app import HdmiSelectorApp
 
 logger = logging.getLogger("HDMI_selector.main")
+
+TEACHER_CLI_NOTE = (
+    "Nota: el telón OLED del Modo Docente solo funciona mientras la interfaz gráfica "
+    "(GUI) está abierta. Desde la línea de comandos solo se aplicó la topología "
+    "extendida y se pausó el salvapantallas."
+)
+
+
+def enable_dpi_awareness() -> bool:
+    """Makes the process DPI aware before any Tk window is created.
+
+    Tries per-monitor DPI awareness (shcore.SetProcessDpiAwareness(2)) and falls back to
+    system DPI awareness (user32.SetProcessDPIAware()). No-op on non-Windows platforms.
+
+    Returns:
+        True if one of the calls succeeded, False otherwise.
+    """
+    windll = getattr(ctypes, "windll", None)
+    if windll is None:
+        return False
+    try:
+        # 0 == S_OK; E_ACCESSDENIED means awareness was already set (still fine).
+        res = windll.shcore.SetProcessDpiAwareness(2)
+        if res in (0, -2147024891, 0x80070005):
+            return True
+    except Exception as e:
+        logger.debug("SetProcessDpiAwareness unavailable: %s", e)
+    try:
+        return bool(windll.user32.SetProcessDPIAware())
+    except Exception as e:
+        logger.debug("SetProcessDPIAware unavailable: %s", e)
+    return False
+
+
+def _persist_default_mode(config: AppConfig, mode: AppMode) -> None:
+    """Persists the last applied mode as default_mode (errors are logged, not raised)."""
+    try:
+        if config.default_mode != mode.value:
+            config.default_mode = mode.value
+            config.save()
+    except Exception as e:
+        logger.warning("No se pudo guardar el modo por defecto en la configuración: %s", e)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -72,7 +115,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         argv: Optional list of command-line arguments. If None, uses sys.argv[1:].
 
     Returns:
-        0 on success, 1 or argparse error code (e.g. 2) on failure.
+        0 on success (for --mode: the display topology was applied), 1 or argparse
+        error code (e.g. 2) on failure.
     """
     parser = build_parser()
     try:
@@ -104,8 +148,9 @@ def main(argv: Optional[list[str]] = None) -> int:
             dm = DisplayManager()
             technologies = dm.get_active_display_technologies()
             status_data = {
-                "is_hdmi_connected": dm.is_hdmi_connected(technologies),
+                "is_hdmi_connected": dm.is_hdmi_connected(),
                 "active_displays": dm.get_active_display_names(technologies),
+                "current_topology": dm.get_current_topology(),
                 "screensaver": dm.get_screensaver_state(),
                 "config": asdict(config),
             }
@@ -122,17 +167,29 @@ def main(argv: Optional[list[str]] = None) -> int:
     if args.mode:
         try:
             app_mode = AppMode(args.mode)
+            config = AppConfig()
+            config.load()
             dm = DisplayManager()
             kwargs = {}
             if args.timeout is not None:
                 kwargs["timeout_seconds"] = args.timeout
+            elif app_mode == AppMode.NORMAL:
+                kwargs["timeout_seconds"] = config.screensaver_timeout
 
             result = dm.apply_mode(app_mode, **kwargs)
-            if result.get("success"):
+            topology_ok = bool(result.get("topology_ok", result.get("success")))
+            if topology_ok:
+                _persist_default_mode(config, app_mode)
                 if args.json:
+                    if app_mode == AppMode.TEACHER:
+                        result = dict(result, note=TEACHER_CLI_NOTE)
                     print(json.dumps(result, indent=2, default=str))
                 else:
                     print(f"Modo '{args.mode}' aplicado con éxito.")
+                    if result.get("screensaver_ok") is False:
+                        print("Advertencia: no se pudo configurar el salvapantallas.")
+                    if app_mode == AppMode.TEACHER:
+                        print(TEACHER_CLI_NOTE)
                 return 0
             else:
                 if args.json:
@@ -152,6 +209,9 @@ def main(argv: Optional[list[str]] = None) -> int:
             return 1
 
     # Default mode or explicit --gui
+    # DPI awareness must be set before any Tk window exists so that Win32 coordinates
+    # (cursor, monitor rects) are physical pixels on every monitor.
+    enable_dpi_awareness()
     try:
         app = HdmiSelectorApp()
         app.mainloop()

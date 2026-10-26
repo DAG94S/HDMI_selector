@@ -36,7 +36,13 @@ def mock_display_manager():
     dm.get_active_display_names.return_value = ["Internal/Laptop", "HDMI"]
     dm.set_display_topology.return_value = True
     dm.set_screensaver.return_value = True
-    dm.apply_mode.return_value = {"success": True, "mode": AppMode.NORMAL}
+    dm.apply_mode.return_value = {
+        "success": True,
+        "topology_ok": True,
+        "screensaver_ok": True,
+        "mode": AppMode.NORMAL,
+    }
+    dm.detect_current_mode = Mock(return_value=None)
     return dm
 
 
@@ -80,9 +86,27 @@ def _safe_destroy(app):
         pass
 
 
+def _sync(fn):
+    """Synchronous replacement for the background executor."""
+    fn()
+
+
+def _select(app, mode):
+    """Calls select_mode and pumps the UI queue; returns the final result dict."""
+    res = app.select_mode(mode)
+    if res.get("pending"):
+        app.process_pending()
+        return app.last_result
+    return res
+
+
 def _create_app(**kwargs):
-    """Instantiates HdmiSelectorApp with retry to handle Windows Tcl teardown latency."""
+    """Instantiates HdmiSelectorApp with retry to handle Windows Tcl teardown latency.
+
+    Background work runs synchronously; call ``app.process_pending()`` to pump the UI queue.
+    """
     import time
+    kwargs.setdefault("run_in_background", _sync)
     for attempt in range(3):
         try:
             return HdmiSelectorApp(**kwargs)
@@ -102,6 +126,7 @@ def app_instance(mock_config, mock_display_manager, mock_monitor):
         start_monitor=False,
         withdraw=True,
     )
+    app.process_pending()
     yield app
     _safe_destroy(app)
 
@@ -117,6 +142,7 @@ def app_with_curtain(mock_config, mock_display_manager, mock_monitor, mock_curta
         start_monitor=False,
         withdraw=True,
     )
+    app.process_pending()
     yield app
     _safe_destroy(app)
 
@@ -175,7 +201,7 @@ class TestHdmiSelectorAppModeSelection:
     def test_select_mode_presentation_when_connected(self, app_instance, mock_display_manager, mock_monitor, mock_config):
         """Selecting presentation mode when HDMI is connected applies mode without confirmation."""
         mock_monitor.last_status = True
-        res = app_instance.select_mode(AppMode.PRESENTATION)
+        res = _select(app_instance, AppMode.PRESENTATION)
 
         assert res.get("success") is True
         mock_display_manager.apply_mode.assert_called_with(
@@ -186,8 +212,8 @@ class TestHdmiSelectorAppModeSelection:
 
         # Check visual card state
         pres_card = app_instance.mode_cards[AppMode.PRESENTATION]
-        assert pres_card["badge"].cget("text") == "[ACTIVO]"
-        assert pres_card["button"].cget("state") == "disabled"
+        assert pres_card["badge"].cget("text") == "✓ Activo"
+        assert pres_card["button"].cget("state") == "normal"
 
         norm_card = app_instance.mode_cards[AppMode.NORMAL]
         assert norm_card["badge"].cget("text") == ""
@@ -199,7 +225,7 @@ class TestHdmiSelectorAppModeSelection:
         mock_display_manager.is_hdmi_connected.return_value = False
         mock_askyesno = mocker.patch("tkinter.messagebox.askyesno", return_value=False)
 
-        res = app_instance.select_mode(AppMode.PRESENTATION)
+        res = _select(app_instance, AppMode.PRESENTATION)
 
         mock_askyesno.assert_called_once()
         mock_display_manager.apply_mode.assert_not_called()
@@ -212,7 +238,7 @@ class TestHdmiSelectorAppModeSelection:
         mock_display_manager.is_hdmi_connected.return_value = False
         mock_askyesno = mocker.patch("tkinter.messagebox.askyesno", return_value=True)
 
-        res = app_instance.select_mode(AppMode.PRESENTATION)
+        res = _select(app_instance, AppMode.PRESENTATION)
 
         mock_askyesno.assert_called_once()
         mock_display_manager.apply_mode.assert_called_with(
@@ -222,7 +248,7 @@ class TestHdmiSelectorAppModeSelection:
 
     def test_select_mode_exercises(self, app_instance, mock_display_manager, mock_monitor, mock_config):
         """Selecting exercises mode applies extend topology."""
-        res = app_instance.select_mode(AppMode.EXERCISES)
+        res = _select(app_instance, AppMode.EXERCISES)
 
         assert res.get("success") is True
         mock_display_manager.apply_mode.assert_called_with(
@@ -232,8 +258,8 @@ class TestHdmiSelectorAppModeSelection:
         assert mock_config.default_mode == "exercises"
 
         ex_card = app_instance.mode_cards[AppMode.EXERCISES]
-        assert ex_card["badge"].cget("text") == "[ACTIVO]"
-        assert ex_card["button"].cget("state") == "disabled"
+        assert ex_card["badge"].cget("text") == "✓ Activo"
+        assert ex_card["button"].cget("state") == "normal"
 
     def test_select_mode_normal(self, app_instance, mock_display_manager, mock_monitor, mock_config):
         """Selecting normal mode applies internal topology and screensaver."""
@@ -241,7 +267,7 @@ class TestHdmiSelectorAppModeSelection:
         mock_monitor.current_mode = AppMode.EXERCISES
         app_instance._update_mode_cards_visual(AppMode.EXERCISES)
 
-        res = app_instance.select_mode(AppMode.NORMAL)
+        res = _select(app_instance, AppMode.NORMAL)
 
         assert res.get("success") is True
         mock_display_manager.apply_mode.assert_called_with(
@@ -251,13 +277,14 @@ class TestHdmiSelectorAppModeSelection:
         assert mock_config.default_mode == "normal"
 
         norm_card = app_instance.mode_cards[AppMode.NORMAL]
-        assert norm_card["badge"].cget("text") == "[ACTIVO]"
-        assert norm_card["button"].cget("state") == "disabled"
+        assert norm_card["badge"].cget("text") == "✓ Activo"
+        assert norm_card["button"].cget("state") == "normal"
 
     def test_card_buttons_invoke(self, app_instance, mock_display_manager, mock_monitor):
         """Clicking buttons directly on the cards triggers select_mode."""
         # Click exercises button
         app_instance.mode_cards[AppMode.EXERCISES]["button"].invoke()
+        app_instance.process_pending()
         mock_display_manager.apply_mode.assert_called_with(
             AppMode.EXERCISES, timeout_seconds=app_instance.config.screensaver_timeout
         )
@@ -268,15 +295,15 @@ class TestHdmiSelectorAppThreadSafety:
     """Tests for thread safety and status updates."""
 
     def test_status_change_dispatched_via_after(self, app_instance, mocker):
-        """Background callback schedules UI update via self.after."""
+        """Background callback never touches Tk: it enqueues, the Tk thread applies it."""
         mock_after = mocker.spy(app_instance, "after")
 
-        # Invoke the callback set on monitor
-        app_instance._on_hdmi_status_threadsafe(True, ["Internal/Laptop", "HDMI"])
+        app_instance._on_hdmi_status_threadsafe(True, ["Internal/Laptop", "HDMI", "X"])
+        assert not mock_after.called  # no after() from a foreign thread
+        assert "X" not in app_instance.displays_label.cget("text")
 
-        # Must have called after(0, ...)
-        assert mock_after.called
-        assert mock_after.call_args[0][0] == 0
+        app_instance.process_pending()
+        assert "X" in app_instance.displays_label.cget("text")
 
     def test_on_hdmi_status_changed_connected_ui(self, app_instance):
         """UI updates to green badge when HDMI connects."""
@@ -302,7 +329,7 @@ class TestHdmiSelectorAppThreadSafety:
         app_instance._on_hdmi_status_changed(False, ["Internal/Laptop"])
 
         norm_card = app_instance.mode_cards[AppMode.NORMAL]
-        assert norm_card["badge"].cget("text") == "[ACTIVO]"
+        assert norm_card["badge"].cget("text") == "✓ Activo"
         assert mock_config.default_mode == "normal"
 
 
@@ -349,10 +376,9 @@ class TestHdmiSelectorAppConfigSettings:
         """Clicking Actualizar re-polls monitor and updates UI."""
         mock_monitor.poll_once.return_value = (True, ["Internal/Laptop", "External 4K"])
 
-        connected, names = app_instance.refresh_status()
+        app_instance.refresh_status()
+        app_instance.process_pending()
 
-        assert connected is True
-        assert "External 4K" in names
         assert "HDMI Conectado" in app_instance.status_pill.cget("text")
         assert "External 4K" in app_instance.displays_label.cget("text")
 
@@ -409,7 +435,7 @@ class TestHdmiSelectorAppEdgeCases:
             assert app.theme_menu.get() == "Claro"
             assert app.auto_restore_var.get() is False
             ex_card = app.mode_cards[AppMode.EXERCISES]
-            assert ex_card["badge"].cget("text") == "[ACTIVO]"
+            assert ex_card["badge"].cget("text") == "✓ Activo"
         finally:
             _safe_destroy(app)
 
@@ -418,7 +444,7 @@ class TestHdmiSelectorAppEdgeCases:
         mock_display_manager.apply_mode.side_effect = RuntimeError("Win32 failure")
         mock_error = mocker.patch("tkinter.messagebox.showerror")
 
-        res = app_instance.select_mode(AppMode.EXERCISES)
+        res = _select(app_instance, AppMode.EXERCISES)
 
         mock_error.assert_called_once()
         assert res.get("success") is False
@@ -431,7 +457,7 @@ class TestHdmiSelectorAppEdgeCases:
 
         # Previous active mode was NORMAL
         assert app_instance.monitor.current_mode == AppMode.NORMAL
-        res = app_instance.select_mode(AppMode.EXERCISES)
+        res = _select(app_instance, AppMode.EXERCISES)
 
         mock_error.assert_called_once()
         assert res.get("success") is False
@@ -462,7 +488,7 @@ class TestHdmiSelectorAppEdgeCases:
         try:
             assert app.monitor.current_mode == AppMode.NORMAL
             normal_card = app.mode_cards[AppMode.NORMAL]
-            assert normal_card["badge"].cget("text") == "[ACTIVO]"
+            assert normal_card["badge"].cget("text") == "✓ Activo"
         finally:
             _safe_destroy(app)
 
@@ -491,9 +517,12 @@ class TestHdmiSelectorAppEdgeCases:
             withdraw=True,
         )
         try:
+            # Curtain starts only after background detection is delivered
+            mock_curtain.start.assert_not_called()
+            app.process_pending()
             assert app.monitor.current_mode == AppMode.TEACHER
             teach_card = app.mode_cards[AppMode.TEACHER]
-            assert teach_card["badge"].cget("text") == "[ACTIVO]"
+            assert teach_card["badge"].cget("text") == "✓ Activo"
             mock_curtain.start.assert_called_once()
         finally:
             _safe_destroy(app)
@@ -524,7 +553,7 @@ class TestHdmiSelectorAppEdgeCases:
         try:
             assert app.monitor.current_mode == AppMode.NORMAL
             normal_card = app.mode_cards[AppMode.NORMAL]
-            assert normal_card["badge"].cget("text") == "[ACTIVO]"
+            assert normal_card["badge"].cget("text") == "✓ Activo"
             mock_curtain.start.assert_not_called()
         finally:
             _safe_destroy(app)
@@ -549,22 +578,44 @@ class TestHdmiSelectorAppEdgeCases:
         mon.stop.assert_called_once()
 
     def test_center_window_calls_geometry(self, app_instance):
-        """_center_window uses native geometry and maintains proper window dimensions."""
+        """_center_window issues a single geometry call, never larger than the requested size."""
+        import re
         with patch.object(app_instance, "geometry") as mock_geom:
-            app_instance._center_window(540, 660)
+            app_instance._center_window(420, 580)
             mock_geom.assert_called_once()
             geom_str = mock_geom.call_args[0][0]
-            assert "540x660" in geom_str
-            assert "+" in geom_str
+            m = re.fullmatch(r"(\d+)x(\d+)\+(\d+)\+(\d+)", geom_str)
+            assert m, geom_str
+            assert int(m.group(1)) <= 420 and int(m.group(2)) <= 580
 
     def test_center_window_fallback_on_win32_failure(self, app_instance):
-        """_center_window falls back cleanly when win32 raises an exception."""
+        """Falls back to Tk metrics when win32 raises; large screen keeps the full size."""
         with patch("ctypes.windll.user32.GetCursorPos", side_effect=RuntimeError("Win32 error")), \
+             patch.object(app_instance, "_get_window_scaling", return_value=1.0), \
+             patch.object(app_instance, "winfo_screenwidth", return_value=1920), \
+             patch.object(app_instance, "winfo_screenheight", return_value=1080), \
              patch.object(app_instance, "geometry") as mock_geom:
-            app_instance._center_window(540, 660)
+            app_instance._center_window(420, 580)
             mock_geom.assert_called_once()
             geom_str = mock_geom.call_args[0][0]
-            assert "540x660" in geom_str
+            assert geom_str.startswith("420x580+")
+
+    def test_center_window_caps_to_small_work_area_with_dpi(self, app_instance):
+        """On a small screen at 150% DPI the window is shrunk to fit the logical work area."""
+        with patch("ctypes.windll.user32.GetCursorPos", side_effect=RuntimeError("Win32 error")), \
+             patch.object(app_instance, "_get_window_scaling", return_value=1.5), \
+             patch.object(app_instance, "winfo_screenwidth", return_value=1280), \
+             patch.object(app_instance, "winfo_screenheight", return_value=720), \
+             patch.object(app_instance, "geometry") as mock_geom:
+            app_instance._center_window(420, 580)
+            geom_str = mock_geom.call_args[0][0]
+            size = geom_str.split("+")[0]
+            w, h = (int(v) for v in size.split("x"))
+            # logical work area 853x480 -> 0.9*853 > 420, 0.85*480 = 408
+            assert w == 420
+            assert h == 408
+            # physical height never exceeds the screen
+            assert h * 1.5 <= 720
 
 
 class TestHdmiSelectorAppTeacherMode:
@@ -574,8 +625,8 @@ class TestHdmiSelectorAppTeacherMode:
         """AppMode.TEACHER exists in app.mode_cards with proper text and button."""
         assert AppMode.TEACHER in app_instance.mode_cards
         teacher_card = app_instance.mode_cards[AppMode.TEACHER]
-        assert teacher_card["default_button_text"] == "Activar Modo Docente"
-        assert teacher_card["button"].cget("text") == "Activar Modo Docente"
+        assert teacher_card["default_button_text"] == "Activar"
+        assert teacher_card["button"].cget("text") == "Activar"
 
     def test_select_mode_teacher_when_connected(
         self, app_with_curtain, mock_display_manager, mock_monitor, mock_config, mock_curtain
@@ -589,7 +640,7 @@ class TestHdmiSelectorAppTeacherMode:
             "screensaver": False,
         }
 
-        res = app_with_curtain.select_mode(AppMode.TEACHER)
+        res = _select(app_with_curtain, AppMode.TEACHER)
 
         assert res.get("success") is True
         mock_display_manager.apply_mode.assert_called_with(
@@ -600,8 +651,8 @@ class TestHdmiSelectorAppTeacherMode:
 
         # Check visual card state
         teacher_card = app_with_curtain.mode_cards[AppMode.TEACHER]
-        assert teacher_card["badge"].cget("text") == "[ACTIVO]"
-        assert teacher_card["button"].cget("state") == "disabled"
+        assert teacher_card["badge"].cget("text") == "✓ Activo"
+        assert teacher_card["button"].cget("state") == "normal"
 
         # Verify curtain was started
         mock_curtain.start.assert_called_once()
@@ -613,7 +664,7 @@ class TestHdmiSelectorAppTeacherMode:
         mock_monitor.current_mode = AppMode.TEACHER
         mock_curtain.is_running.return_value = True
 
-        res = app_with_curtain.select_mode(AppMode.NORMAL)
+        res = _select(app_with_curtain, AppMode.NORMAL)
 
         assert res.get("success") is True
         mock_curtain.stop.assert_called_once()
@@ -666,7 +717,7 @@ class TestHdmiSelectorAppTeacherMode:
         mock_display_manager.is_hdmi_connected.return_value = False
         mock_askyesno = mocker.patch("tkinter.messagebox.askyesno", return_value=False)
 
-        res = app_with_curtain.select_mode(AppMode.TEACHER)
+        res = _select(app_with_curtain, AppMode.TEACHER)
 
         mock_askyesno.assert_called_once()
         mock_display_manager.apply_mode.assert_not_called()
@@ -682,7 +733,7 @@ class TestHdmiSelectorAppTeacherMode:
         mock_display_manager.is_hdmi_connected.return_value = False
         mock_askyesno = mocker.patch("tkinter.messagebox.askyesno", return_value=True)
 
-        res = app_with_curtain.select_mode(AppMode.TEACHER)
+        res = _select(app_with_curtain, AppMode.TEACHER)
 
         mock_askyesno.assert_called_once()
         mock_display_manager.apply_mode.assert_called_with(
@@ -710,3 +761,268 @@ class TestHdmiSelectorAppTeacherMode:
             _safe_destroy(app)
 
 
+class TestHdmiSelectorAppAsyncSwitching:
+    """Tests for background mode switching, queue delivery and state reconciliation."""
+
+    def test_select_mode_does_not_apply_inline(self, app_instance, mock_display_manager):
+        """With a deferred executor, select_mode returns before apply_mode and disables tiles."""
+        jobs = []
+        app_instance._run_in_background = jobs.append
+
+        res = app_instance.select_mode(AppMode.EXERCISES)
+
+        assert res.get("pending") is True
+        mock_display_manager.apply_mode.assert_not_called()
+        for card in app_instance.mode_cards.values():
+            assert card["button"].cget("state") == "disabled"
+        assert "Aplicando" in app_instance.toast_label.cget("text")
+
+        jobs[0]()  # worker thread body
+        app_instance.process_pending()
+        mock_display_manager.apply_mode.assert_called_once()
+        for card in app_instance.mode_cards.values():
+            assert card["button"].cget("state") == "normal"
+        assert app_instance.toast_label.cget("text") == ""
+
+    def test_second_select_ignored_while_switching(self, app_instance, mock_display_manager):
+        jobs = []
+        app_instance._run_in_background = jobs.append
+        app_instance.select_mode(AppMode.EXERCISES)
+
+        res = app_instance.select_mode(AppMode.PRESENTATION)
+
+        assert res.get("busy") is True
+        assert len(jobs) == 1
+
+    def test_active_tile_remains_clickable_and_reapplies(self, app_instance, mock_display_manager):
+        _select(app_instance, AppMode.EXERCISES)
+        btn = app_instance.mode_cards[AppMode.EXERCISES]["button"]
+        assert btn.cget("state") == "normal"
+        mock_display_manager.apply_mode.reset_mock()
+
+        btn.invoke()
+        app_instance.process_pending()
+
+        mock_display_manager.apply_mode.assert_called_once()
+
+    def test_curtain_stopped_before_apply_when_leaving_teacher(
+        self, app_with_curtain, mock_display_manager, mock_curtain
+    ):
+        order = []
+        mock_curtain.stop.side_effect = lambda: order.append("stop")
+        mock_display_manager.apply_mode.side_effect = lambda *a, **k: (
+            order.append("apply") or {"success": True, "topology_ok": True, "screensaver_ok": True}
+        )
+
+        _select(app_with_curtain, AppMode.PRESENTATION)
+
+        assert order[:2] == ["stop", "apply"]
+
+    def test_curtain_started_only_after_successful_teacher_apply(
+        self, app_with_curtain, mock_display_manager, mock_curtain
+    ):
+        order = []
+        mock_curtain.start.side_effect = lambda: order.append("start")
+        mock_display_manager.apply_mode.side_effect = lambda *a, **k: (
+            order.append("apply") or {"success": True, "topology_ok": True, "screensaver_ok": True}
+        )
+
+        _select(app_with_curtain, AppMode.TEACHER)
+
+        assert order == ["apply", "start"]
+
+    def test_curtain_not_started_when_teacher_topology_fails(
+        self, app_with_curtain, mock_display_manager, mock_curtain, mocker
+    ):
+        mocker.patch("tkinter.messagebox.showerror")
+        mock_display_manager.apply_mode.return_value = {
+            "success": False, "topology_ok": False, "screensaver_ok": True,
+        }
+
+        res = _select(app_with_curtain, AppMode.TEACHER)
+
+        assert res["topology_ok"] is False
+        mock_curtain.start.assert_not_called()
+        assert app_with_curtain.monitor.current_mode == AppMode.NORMAL
+
+    def test_topology_ok_decides_success_and_screensaver_warning(
+        self, app_instance, mock_display_manager, mock_config, mocker
+    ):
+        mock_error = mocker.patch("tkinter.messagebox.showerror")
+        mock_display_manager.apply_mode.return_value = {
+            "success": True, "topology_ok": True, "screensaver_ok": False,
+        }
+
+        _select(app_instance, AppMode.EXERCISES)
+
+        mock_error.assert_not_called()
+        assert mock_config.default_mode == "exercises"
+        assert app_instance.mode_cards[AppMode.EXERCISES]["badge"].cget("text") == "✓ Activo"
+        assert "salvapantallas" in app_instance.toast_label.cget("text")
+
+    def test_failure_resyncs_tiles_with_detected_mode(
+        self, app_instance, mock_display_manager, mocker
+    ):
+        mocker.patch("tkinter.messagebox.showerror")
+        mock_display_manager.apply_mode.return_value = {"success": False, "topology_ok": False}
+        mock_display_manager.detect_current_mode.return_value = AppMode.PRESENTATION
+
+        _select(app_instance, AppMode.EXERCISES)
+        app_instance.process_pending()
+
+        assert app_instance.mode_cards[AppMode.PRESENTATION]["badge"].cget("text") == "✓ Activo"
+        assert app_instance.monitor.current_mode == AppMode.PRESENTATION
+
+    def test_mode_lock_and_notify_used_when_available(
+        self, app_instance, mock_monitor, mock_display_manager
+    ):
+        lock = MagicMock()
+        mock_monitor.mode_lock = lock
+        order = []
+        mock_monitor.notify_mode_change = Mock(side_effect=lambda m: order.append("notify"))
+        mock_display_manager.apply_mode.side_effect = lambda *a, **k: (
+            order.append("apply") or {"success": True, "topology_ok": True}
+        )
+
+        _select(app_instance, AppMode.EXERCISES)
+
+        assert order == ["notify", "apply"]
+        lock.acquire.assert_called_once()
+        lock.release.assert_called_once()
+
+    def test_unknown_hdmi_state_does_not_prompt(
+        self, app_instance, mock_monitor, mock_display_manager, mocker
+    ):
+        mock_monitor.last_status = None
+        mock_display_manager.is_hdmi_connected.return_value = None
+        mock_ask = mocker.patch("tkinter.messagebox.askyesno")
+
+        _select(app_instance, AppMode.PRESENTATION)
+
+        mock_ask.assert_not_called()
+        mock_display_manager.apply_mode.assert_called_once()
+
+    def test_startup_detects_real_mode_over_config(
+        self, tmp_path, mock_display_manager, mock_monitor
+    ):
+        cfg = AppConfig(default_mode="normal", config_path=str(tmp_path / "det.json"))
+        mock_monitor.current_mode = None
+        mock_display_manager.detect_current_mode.return_value = AppMode.EXERCISES
+        app = _create_app(
+            config=cfg, display_manager=mock_display_manager, monitor=mock_monitor,
+            start_monitor=False, withdraw=True,
+        )
+        try:
+            app.process_pending()
+            assert app.monitor.current_mode == AppMode.EXERCISES
+            assert cfg.default_mode == "exercises"
+            assert app.mode_cards[AppMode.EXERCISES]["badge"].cget("text") == "✓ Activo"
+        finally:
+            _safe_destroy(app)
+
+    def test_startup_extend_with_teacher_config_is_teacher(
+        self, tmp_path, mock_display_manager, mock_monitor, mock_curtain
+    ):
+        cfg = AppConfig(default_mode="teacher", config_path=str(tmp_path / "det2.json"))
+        mock_monitor.current_mode = None
+        mock_monitor.last_status = True
+        mock_display_manager.detect_current_mode.return_value = AppMode.EXERCISES
+        app = _create_app(
+            config=cfg, display_manager=mock_display_manager, monitor=mock_monitor,
+            teacher_curtain=mock_curtain, start_monitor=False, withdraw=True,
+        )
+        try:
+            app.process_pending()
+            assert app.monitor.current_mode == AppMode.TEACHER
+            assert cfg.default_mode == "teacher"
+            mock_curtain.start.assert_called_once()
+        finally:
+            _safe_destroy(app)
+
+    def test_startup_detection_none_keeps_config(
+        self, tmp_path, mock_display_manager, mock_monitor
+    ):
+        cfg = AppConfig(default_mode="exercises", config_path=str(tmp_path / "det3.json"))
+        mock_monitor.current_mode = None
+        mock_display_manager.detect_current_mode.return_value = None
+        app = _create_app(
+            config=cfg, display_manager=mock_display_manager, monitor=mock_monitor,
+            start_monitor=False, withdraw=True,
+        )
+        try:
+            app.process_pending()
+            assert app.monitor.current_mode == AppMode.EXERCISES
+        finally:
+            _safe_destroy(app)
+
+    def test_mode_restored_by_monitor_updates_ui_curtain_and_config(
+        self, app_with_curtain, mock_curtain, mock_config, mock_monitor
+    ):
+        _select(app_with_curtain, AppMode.TEACHER)
+        mock_curtain.reset_mock()
+
+        # Called from the monitor thread: only enqueues
+        app_with_curtain._on_mode_restored_threadsafe(AppMode.NORMAL)
+        assert mock_config.default_mode == "teacher"
+        app_with_curtain.process_pending()
+
+        mock_curtain.stop.assert_called()
+        assert mock_config.default_mode == "normal"
+        assert mock_monitor.current_mode == AppMode.NORMAL
+        assert app_with_curtain.mode_cards[AppMode.NORMAL]["badge"].cget("text") == "✓ Activo"
+        assert "restauró el modo Normal" in app_with_curtain.toast_label.cget("text")
+
+    def test_default_monitor_gets_restore_callback(self):
+        with patch("HDMI_selector.ui.app.HdmiMonitor") as MockMon:
+            inst = MockMon.return_value
+            inst.is_running.return_value = False
+            inst.last_status = False
+            inst.last_display_names = []
+            inst.current_mode = AppMode.NORMAL
+            inst.poll_once.return_value = (False, [])
+            app = _create_app(start_monitor=False, withdraw=True)
+            try:
+                assert MockMon.call_args.kwargs["on_mode_restored"] == app._on_mode_restored_threadsafe
+            finally:
+                _safe_destroy(app)
+
+    def test_default_monitor_falls_back_without_new_kwargs(self):
+        with patch("HDMI_selector.ui.app.HdmiMonitor") as MockMon:
+            inst = Mock()
+            inst.is_running.return_value = False
+            inst.last_status = False
+            inst.last_display_names = []
+            inst.current_mode = AppMode.NORMAL
+            inst.poll_once.return_value = (False, [])
+            MockMon.side_effect = [TypeError("unexpected kwarg"), inst]
+            app = _create_app(start_monitor=False, withdraw=True)
+            try:
+                assert app.monitor is inst
+            finally:
+                _safe_destroy(app)
+
+    def test_refresh_runs_poll_in_background_executor(self, app_instance, mock_monitor):
+        jobs = []
+        app_instance._run_in_background = jobs.append
+        mock_monitor.poll_once.reset_mock()
+
+        app_instance.refresh_status()
+        mock_monitor.poll_once.assert_not_called()
+
+        jobs[0]()
+        mock_monitor.poll_once.assert_called_once()
+
+    def test_status_text_includes_active_mode(self, app_instance):
+        _select(app_instance, AppMode.TEACHER)
+        app_instance._on_hdmi_status_changed(True, ["HDMI"])
+        assert "HDMI Conectado" in app_instance.status_pill.cget("text")
+        assert "Docente" in app_instance.status_pill.cget("text")
+
+    def test_destroy_cancels_queue_poll(self, mock_config, mock_display_manager, mock_monitor):
+        app = _create_app(
+            config=mock_config, display_manager=mock_display_manager, monitor=mock_monitor,
+            start_monitor=False, withdraw=True,
+        )
+        assert app._queue_after_id is not None
+        _safe_destroy(app)
+        assert app._closing is True

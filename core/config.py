@@ -4,10 +4,33 @@ import json
 import logging
 import os
 from dataclasses import dataclass
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_CONFIG_PATH = os.path.join(os.path.expanduser("~"), ".hdmi_selector_config.json")
+
+# Valid values used to validate persisted configuration
+VALID_MODES = ("presentation", "teacher", "exercises", "normal")
+VALID_THEMES = ("dark", "light", "system")
+
+# Upper bounds (seconds) to reject absurd persisted values
+MAX_TIMEOUT_SECONDS = 86400
+MAX_POLL_INTERVAL_SECONDS = 3600
+
+
+def _is_positive_int(value: Any, maximum: int) -> bool:
+    """Returns True if value is an int (not bool) within (0, maximum]."""
+    return isinstance(value, int) and not isinstance(value, bool) and 0 < value <= maximum
+
+
+def _is_positive_number(value: Any, maximum: float) -> bool:
+    """Returns True if value is an int/float (not bool) within (0, maximum]."""
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and 0 < value <= maximum
+    )
 
 
 @dataclass
@@ -16,8 +39,8 @@ class AppConfig:
 
     Attributes:
         screensaver_timeout: Inactivity timeout in seconds before screensaver activates.
-        default_mode: Default display mode ('normal' or 'game').
-        theme: UI theme ('dark' or 'light').
+        default_mode: Last applied / default display mode (one of VALID_MODES).
+        theme: UI theme ('dark', 'light' or 'system').
         poll_interval_seconds: Polling interval in seconds for device/monitor checks.
         auto_restore_on_disconnect: Whether to restore default display config when HDMI disconnects.
         teacher_timeout_seconds: Inactivity timeout in seconds before dimming screen in teacher mode.
@@ -35,8 +58,9 @@ class AppConfig:
     def load(self) -> None:
         """Load configuration from JSON file.
 
-        Preserves existing defaults for any missing or null fields.
-        Logs a warning on deserialization or filesystem errors.
+        Each field is validated independently (type and range). Missing, null or
+        invalid fields keep their current (default) value, and invalid values are
+        logged as warnings. Logs a warning on deserialization or filesystem errors.
         """
         if not os.path.exists(self.config_path):
             return
@@ -44,7 +68,7 @@ class AppConfig:
         try:
             with open(self.config_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
-        except (json.JSONDecodeError, OSError) as e:
+        except (json.JSONDecodeError, OSError, UnicodeDecodeError) as e:
             logger.warning("Failed to load configuration from %s: %s", self.config_path, e)
             return
 
@@ -52,18 +76,31 @@ class AppConfig:
             logger.warning("Configuration root in %s is not a dictionary", self.config_path)
             return
 
-        if (val := data.get("screensaver_timeout")) is not None:
-            self.screensaver_timeout = val
-        if (val := data.get("default_mode")) is not None:
-            self.default_mode = val
-        if (val := data.get("theme")) is not None:
-            self.theme = val
-        if (val := data.get("poll_interval_seconds")) is not None:
-            self.poll_interval_seconds = val
-        if (val := data.get("auto_restore_on_disconnect")) is not None:
-            self.auto_restore_on_disconnect = val
-        if (val := data.get("teacher_timeout_seconds")) is not None:
-            self.teacher_timeout_seconds = val
+        validators = {
+            "screensaver_timeout": lambda v: _is_positive_int(v, MAX_TIMEOUT_SECONDS),
+            "default_mode": lambda v: isinstance(v, str) and v.lower() in VALID_MODES,
+            "theme": lambda v: isinstance(v, str) and v.lower() in VALID_THEMES,
+            "poll_interval_seconds": lambda v: _is_positive_number(v, MAX_POLL_INTERVAL_SECONDS),
+            "auto_restore_on_disconnect": lambda v: isinstance(v, bool),
+            "teacher_timeout_seconds": lambda v: _is_positive_int(v, MAX_TIMEOUT_SECONDS),
+        }
+
+        for field_name, is_valid in validators.items():
+            val = data.get(field_name)
+            if val is None:
+                continue
+            if not is_valid(val):
+                logger.warning(
+                    "Invalid value %r for '%s' in %s; keeping %r",
+                    val,
+                    field_name,
+                    self.config_path,
+                    getattr(self, field_name),
+                )
+                continue
+            if isinstance(val, str):
+                val = val.lower()
+            setattr(self, field_name, val)
 
     def save(self) -> None:
         """Save the current configuration to the config file atomically.
