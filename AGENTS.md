@@ -17,7 +17,7 @@ Su objetivo principal es:
 
 ## 2. Modos de Operación (`AppMode`)
 
-Definidos en [`core/display_manager.py`](file:///C:/Users/diego/utilidades_codigo/HDMI_selector/core/display_manager.py):
+Definidos en [`core/display_manager.py`](core/display_manager.py):
 
 | Modo (`AppMode`) | Topología CCD | Salvapantallas | Telón OLED (`OledCurtain`) | Comportamiento |
 |---|---|---|---|---|
@@ -71,7 +71,7 @@ HDMI_selector/
 - En el Modo Docente **nunca debe aplicarse `SDC_TOPOLOGY_EXTERNAL`**, ya que Windows colapsa todas las ventanas (notas de clase, Excel de calificaciones, etc.) hacia la pantalla externa. Siempre debe usarse `SDC_TOPOLOGY_EXTEND`.
 
 ### D. Auto-Restauración de Seguridad (`auto_restore`)
-- Si el cable HDMI se desconecta físicamente mientras el sistema está en `AppMode.PRESENTATION` o `AppMode.TEACHER`, [`HdmiMonitor`](file:///C:/Users/diego/utilidades_codigo/HDMI_selector/core/hdmi_monitor.py) debe restaurar inmediatamente `AppMode.NORMAL` para encender la pantalla de la laptop y asegurar que el usuario nunca se quede sin señal ni a oscuras.
+- Si el cable HDMI se desconecta físicamente mientras el sistema está en `AppMode.PRESENTATION` o `AppMode.TEACHER`, [`HdmiMonitor`](core/hdmi_monitor.py) debe restaurar inmediatamente `AppMode.NORMAL` para encender la pantalla de la laptop y asegurar que el usuario nunca se quede sin señal ni a oscuras.
 
 ### E. Destrucción Limpia de Tkinter / CustomTkinter en Pruebas
 - En Windows y Python 3.14+, `customtkinter.CTk` programa callbacks diferidos mediante `after()` (iconos de barra de título, escalado DPI).
@@ -119,19 +119,19 @@ python main.py --mode normal
 ```
 
 ### Compilación con PyInstaller
-Los archivos de especificación (`.spec`) residen en la raíz del repositorio (`C:\Users\diego\utilidades_codigo`):
+Los archivos `.spec` están en la raíz de este repositorio. Ejecutar PyInstaller desde la carpeta **padre** del repo (el paquete se importa como `HDMI_selector`), así los ejecutables quedan en `..\dist\`:
 ```powershell
-# Compilar versión con Interfaz Gráfica (sin consola)
-pyinstaller --noconfirm HDMI_Selector_GUI.spec
-
-# Compilar versión CLI
-pyinstaller --noconfirm HDMI_Selector.spec
+cd ..
+# Interfaz Gráfica (sin consola)
+pyinstaller --noconfirm HDMI_selector/HDMI_Selector_GUI.spec
+# CLI
+pyinstaller --noconfirm HDMI_selector/HDMI_Selector.spec
 ```
-Los ejecutables resultantes se generan en `dist/`:
+Resultado:
 - `dist/HDMI_Selector_GUI.exe`
 - `dist/HDMI_Selector.exe`
 
+El ícono (`assets/app.ico`) se incrusta en ambos ejecutables y se usa también como ícono de la ventana.
+
 ### Acceso Directo de Windows
-El acceso directo de escritorio está ubicado en:
-- `C:\Users\diego\Desktop\HDMI Selector.lnk`
-- Apunta a: `C:\Users\diego\utilidades_codigo\dist\HDMI_Selector_GUI.exe`
+Crear un acceso directo en el escritorio que apunte a `dist\HDMI_Selector_GUI.exe` (el ícono se toma del propio `.exe`).
