@@ -2,7 +2,9 @@
 
 import ctypes
 import logging
+import os
 import queue
+import sys
 import threading
 import tkinter.font as tkfont
 from ctypes import wintypes
@@ -32,6 +34,16 @@ C_WARN = "#F59E0B"
 
 RADIUS = 12
 SP_XS, SP_S, SP_M, SP_L = 4, 8, 12, 16
+
+
+def _icon_path() -> Optional[str]:
+    """Returns the app .ico path (source tree or PyInstaller bundle), or None."""
+    base = getattr(sys, "_MEIPASS", None) or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    candidates = [
+        os.path.join(base, "HDMI_selector", "assets", "app.ico"),
+        os.path.join(base, "assets", "app.ico"),
+    ]
+    return next((c for c in candidates if os.path.isfile(c)), None)
 
 # mode -> (glyph, name, subtitle, long description, default button text)
 MODE_INFO: dict[AppMode, tuple[str, str, str, str, str]] = {
@@ -183,6 +195,13 @@ class HdmiSelectorApp(ctk.CTk):
         self.font_family = "Segoe UI Variable" if "Segoe UI Variable" in families else "Segoe UI"
 
         self.title("HDMI Selector")
+        icon = _icon_path()
+        if icon:
+            try:
+                # Also stops CTk from replacing it with its default icon
+                self.iconbitmap(icon)
+            except Exception as e:
+                logger.debug("Could not set window icon: %s", e)
         self.configure(fg_color=C_BG)
         self.minsize(360, 420)
         self._center_window(420, 580)
